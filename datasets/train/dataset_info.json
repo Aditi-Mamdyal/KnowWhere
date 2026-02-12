@@ -1,0 +1,63 @@
+{
+  "builder_name": "parquet",
+  "citation": "",
+  "config_name": "default",
+  "dataset_name": "company_documents",
+  "dataset_size": 5959141,
+  "description": "",
+  "download_checksums": {
+    "hf://datasets/AyoubChLin/CompanyDocuments@25162d0693d709d7ebb43b83be38b6451e2f8ce5/data/train-00000-of-00001.parquet": {
+      "num_bytes": 1228494,
+      "checksum": null
+    }
+  },
+  "download_size": 1228494,
+  "features": {
+    "file_content": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "file_name": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "extracted_data": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "document_type": {
+      "dtype": "string",
+      "_type": "Value"
+    },
+    "chat_format": {
+      "feature": {
+        "content": {
+          "dtype": "string",
+          "_type": "Value"
+        },
+        "role": {
+          "dtype": "string",
+          "_type": "Value"
+        }
+      },
+      "_type": "List"
+    }
+  },
+  "homepage": "",
+  "license": "",
+  "size_in_bytes": 7187635,
+  "splits": {
+    "train": {
+      "name": "train",
+      "num_bytes": 5959141,
+      "num_examples": 2469,
+      "dataset_name": "company_documents"
+    }
+  },
+  "version": {
+    "version_str": "0.0.0",
+    "major": 0,
+    "minor": 0,
+    "patch": 0
+  }
+}
