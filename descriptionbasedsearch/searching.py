@@ -19,10 +19,12 @@ query_vec = model.encode(query)
 scores = []
 for i, doc_vec in enumerate(embeddings):
     score = cosine_similarity(query_vec, doc_vec)
-    scores.append((score, metadata[i]))
+    scores.append((score, metadata[i]["path"]))
 
 # Sort by similarity
 scores.sort(reverse=True)
+if(scores[0][0]<0.3):
+       print("\nNo strong matches found. Showing closest result anyway")
 
 print("\nTop results:\n")
 for score, path in scores[:3]:
