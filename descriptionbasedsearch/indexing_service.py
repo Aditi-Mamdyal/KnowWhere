@@ -1,69 +1,102 @@
-import os #to walk thru folders
-import threading #we need this for two things: running the periodic scan in the background without freezing the GUI, and the Lock + Timer inside the debounce logic.
-import subprocess #used to run the Windows command net use to detect if a drive is a network drive.
-#verify subprocess
-from watchdog.observers import Observer #uses the native Windows API ReadDirectoryChangesW which gets instant notifications from the OS itself.
-from watchdog.observers.polling import PollingObserver #it manually checks the folder every N seconds, like a mini incremental scan of its own. like a fallback
-from watchdog.events import FileSystemEventHandler #base class we inherit from
+import os
+import threading
+import subprocess
+import time
+from watchdog.observers import Observer
+from watchdog.observers.polling import PollingObserver
+from watchdog.events import FileSystemEventHandler
 
-# -------- IMPORT EVERYTHING FROM YOUR EXISTING INDEXER --------
+# -------- IMPORT BOTH INDEXERS --------
 from indexing import incremental_index, should_skip, DOC_FOLDER, CHECK_INTERVAL
+from image_indexing import index_images, DOC_FOLDER as IMAGE_FOLDER
+
+# Image extensions watchdog should care about
+IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".webp", ".bmp"}
 
 
 # =============================================================================
-# PART 1 — WATCHDOG EVENT HANDLER
+# PART 1 — UNIFIED INDEXING
 # =============================================================================
-# This class tells watchdog WHAT TO DO when a file event fires.
-# Watchdog calls on_created / on_modified / on_deleted / on_moved
-# automatically whenever the OS reports a file system change.
 
-class DocumentHandler(FileSystemEventHandler): #creating our own class that inherits from watchdog's FileSystemEventHandler. we override the specific methods we care about.
+def run_dual_index(status_callback=None):
+    """Runs both document and image indexing sequentially."""
+    if status_callback:
+        status_callback("Status: Indexing changes...")
+    try:
+        print("\n[SERVICE] Phase 1: Updating text index...")
+        incremental_index()
 
-    def __init__(self, debounce_seconds=3, status_callback=None):
-        self._debounce = debounce_seconds #stores how many seconds to wait after the last event before actually reindexing. 
-        self._timer    = None #special thread that waits a specified amount of time and then calls a function. 
-        self._lock     = threading.Lock()  # prevent race between timer resets. is a thread lock — watchdog fires events on its own internal thread, and multiple events can fire almost simultaneously, so we need a lock to prevent two events from both trying to reset the timer at the exact same millisecond, which could cause a race condition.
-        self._callback = status_callback   # optional GUI label update function
+        print("[SERVICE] Phase 2: Updating image index...")
+        index_images()
 
-    # ---- called when a NEW file appears in the watched folder ----
+        print("[SERVICE] All indices up to date.")
+        if status_callback:
+            status_callback("Status: Index up to date ✓")
+
+    except Exception as e:
+        print(f"[SERVICE] Indexing failed: {e}")
+        if status_callback:
+            status_callback(f"Status: Error — {e}")
+
+
+# =============================================================================
+# PART 2 — WATCHDOG EVENT HANDLER
+# =============================================================================
+
+class DocumentHandler(FileSystemEventHandler):
+
+    def __init__(self, debounce_seconds=5, status_callback=None):
+        self._debounce = debounce_seconds
+        self._timer    = None
+        self._lock     = threading.Lock()
+        self._callback = status_callback
+
+    def _is_relevant(self, path: str) -> bool:
+        """Return True if this file should trigger a reindex."""
+        filename = os.path.basename(path)
+        ext      = os.path.splitext(filename)[1].lower()
+
+        # text document — use should_skip logic
+        if not should_skip(filename):
+            return True
+
+        # image file — check against image extensions
+        if ext in IMAGE_EXTS:
+            return True
+
+        return False
+
     def on_created(self, event):
         if event.is_directory:
             return
-        if should_skip(os.path.basename(event.src_path)):
+        if not self._is_relevant(event.src_path):
             return
         print(f"  [WATCH] New file: {event.src_path}")
         self._schedule_reindex()
 
-    # ---- called when an EXISTING file is written to / saved ----
     def on_modified(self, event):
         if event.is_directory:
             return
-        if should_skip(os.path.basename(event.src_path)):
+        if not self._is_relevant(event.src_path):
             return
         print(f"  [WATCH] Modified: {event.src_path}")
         self._schedule_reindex()
 
-    # ---- called when a file is DELETED ----
     def on_deleted(self, event):
         if event.is_directory:
             return
-        if should_skip(os.path.basename(event.src_path)):
+        if not self._is_relevant(event.src_path):
             return
         print(f"  [WATCH] Deleted: {event.src_path}")
         self._schedule_reindex()
 
-    # ---- called when a file is RENAMED or MOVED ----
     def on_moved(self, event):
         if event.is_directory:
             return
         print(f"  [WATCH] Moved: {event.src_path} → {event.dest_path}")
         self._schedule_reindex()
 
-    # ---- debounce logic ----
     def _schedule_reindex(self):
-        # Every time an event fires, we cancel the previous pending timer
-        # and start a fresh one. This means the actual reindex only runs
-        # after things have been quiet for `debounce_seconds`.
         with self._lock:
             if self._timer is not None:
                 self._timer.cancel()
@@ -71,127 +104,78 @@ class DocumentHandler(FileSystemEventHandler): #creating our own class that inhe
             self._timer.start()
 
     def _run_reindex(self):
-        if self._callback:
-            self._callback("Status: Indexing changes...")
-        try:
-            incremental_index()
-            print("  [WATCH] Re-index complete.")
-            if self._callback:
-                self._callback("Status: Index up to date ✓")
-        except Exception as e:
-            print(f"  [WATCH] Re-index failed: {e}")
-            if self._callback:
-                self._callback(f"Status: Error — {e}")
+        run_dual_index(self._callback)
 
 
 # =============================================================================
-# PART 2 — DETECT IF THE FOLDER IS A NETWORK DRIVE
+# PART 3 — NETWORK DRIVE DETECTION
 # =============================================================================
-# Watchdog's native Observer uses Windows ReadDirectoryChangesW API.
-# This works great for local drives but silently fails on:
-#   - UNC paths like \\server\share
-#   - Mapped network drives like Z:\
-# For those we fall back to PollingObserver which manually checks for
-# changes every N seconds — slower but works everywhere.
 
 def is_network_path(path: str) -> bool:
-    # UNC path — always a network path
     if path.startswith("\\\\"):
         return True
-
-    drive = os.path.splitdrive(path)[0]   # e.g. "Z:"
+    drive = os.path.splitdrive(path)[0]
     if not drive:
         return False
-
-    # Ask Windows if this drive letter is a mapped network drive
     try:
         result = subprocess.run(
             f'net use {drive}',
             capture_output=True, text=True, shell=True
         )
-        return result.returncode == 0   # returncode 0 = Windows recognises it as a network drive
+        return result.returncode == 0
     except Exception:
-        return False   # if we can't tell, assume local and use native observer
+        return False
 
 
 # =============================================================================
-# PART 3 — PERIODIC SAFETY SCAN (background thread)
+# PART 4 — PERIODIC SAFETY SCAN
 # =============================================================================
-# Watchdog is great but can miss events when:
-#   - VPN drops and reconnects mid-session
-#   - Antivirus briefly blocks ReadDirectoryChangesW
-#   - Files are changed by a remote machine on a shared drive
-#
-# This function runs incremental_index() once every CHECK_INTERVAL seconds
-# as a guaranteed safety net. It uses threading.Event.wait() instead of
-# time.sleep() so it wakes up immediately when stop_event is set (clean shutdown).
 
 def _periodic_scan_loop(stop_event: threading.Event, status_callback=None):
     while not stop_event.is_set():
-        # Wait for CHECK_INTERVAL seconds OR until stop_event is set
         stop_event.wait(CHECK_INTERVAL)
-
         if stop_event.is_set():
-            break   # app is closing — exit cleanly
-
+            break
         print("\n[PERIODIC] Safety scan running...")
-        if status_callback:
-            status_callback("Status: Periodic scan running...")
-        try:
-            incremental_index()
-            print("[PERIODIC] Done.")
-            if status_callback:
-                status_callback("Status: Index up to date ✓")
-        except Exception as e:
-            print(f"[PERIODIC] Error: {e}")
+        run_dual_index(status_callback)
 
 
 # =============================================================================
-# PART 4 — START / STOP THE FULL SERVICE
+# PART 5 — SERVICE CONTROL
 # =============================================================================
-# This is the single function your GUI (or any other file) calls.
-# It starts both watchdog AND the periodic safety scan together.
-# Returns (observer, stop_event) so the caller can shut everything down cleanly.
 
 def start_indexing_service(status_callback=None):
-    """
-    Start watchdog watcher + periodic safety scan.
-
-    status_callback: optional function(str) — called with status messages.
-                     Pass a lambda that updates a Tkinter label, for example.
-
-    Returns:
-        observer   — the watchdog Observer (call .stop() + .join() to shut down)
-        stop_event — threading.Event (call .set() to stop the periodic scan)
-    """
-
-    # ---- Step 1: choose the right observer type ----
-    handler = DocumentHandler(debounce_seconds=3, status_callback=status_callback)
+    handler = DocumentHandler(debounce_seconds=5, status_callback=status_callback)
 
     if is_network_path(DOC_FOLDER):
-        # Poll every 30 seconds for network drives
         observer = PollingObserver(timeout=30)
-        print(f"[SERVICE] Network drive detected — using PollingObserver (30s poll)")
-        print(f"[SERVICE] Watching: {DOC_FOLDER}")
+        print("[SERVICE] Network drive — PollingObserver active")
     else:
         observer = Observer()
-        print(f"[SERVICE] Local drive detected — using native Observer")
-        print(f"[SERVICE] Watching: {DOC_FOLDER}")
+        print("[SERVICE] Local drive — native Observer active")
 
-    # recursive=True means subfolders are watched too
+    # Watch the document folder
     observer.schedule(handler, DOC_FOLDER, recursive=True)
-    observer.start()
 
-    # ---- Step 2: start periodic safety scan in a background thread ----
-    stop_event = threading.Event()
+    # If image folder is different from doc folder, watch it separately
+    # In your case both are the same (D:\coding\college) so this is a no-op
+    # but kept here for when they differ
+    if IMAGE_FOLDER != DOC_FOLDER:
+        observer.schedule(handler, IMAGE_FOLDER, recursive=True)
+        print(f"[SERVICE] Also watching image folder: {IMAGE_FOLDER}")
+
+    observer.start()
+    print(f"[SERVICE] Watching: {DOC_FOLDER}")
+
+    stop_event  = threading.Event()
     scan_thread = threading.Thread(
         target=_periodic_scan_loop,
         args=(stop_event, status_callback),
-        daemon=True   # thread dies automatically if main process exits
+        daemon=True
     )
     scan_thread.start()
 
-    print(f"[SERVICE] Periodic safety scan every {CHECK_INTERVAL}s also active.")
+    print(f"[SERVICE] Periodic safety scan every {CHECK_INTERVAL}s active.")
 
     if status_callback:
         status_callback("Status: Watching for changes...")
@@ -200,34 +184,24 @@ def start_indexing_service(status_callback=None):
 
 
 def stop_indexing_service(observer, stop_event):
-    """
-    Cleanly shut down both the watchdog observer and the periodic scan thread.
-    Call this when the app window closes.
-    """
-    print("\n[SERVICE] Shutting down indexing service...")
-    stop_event.set()      # wake up and exit the periodic scan loop
-    observer.stop()       # tell watchdog to stop watching
-    observer.join()       # wait for watchdog thread to fully finish
-    print("[SERVICE] Indexing service stopped.")
+    print("\n[SERVICE] Shutting down...")
+    stop_event.set()
+    observer.stop()
+    observer.join()
+    print("[SERVICE] Stopped.")
 
 
 # =============================================================================
-# STANDALONE MODE — run this file directly to use without a GUI
+# STANDALONE MODE
 # =============================================================================
-# If you run `python indexing_service.py` directly (no GUI),
-# this block starts the service and keeps it alive until Ctrl+C.
 
 if __name__ == "__main__":
-    import time
+    print("[STARTUP] Running initial full index (Text + Images)...")
+    run_dual_index()
 
-    # Run one full index on startup so the index is fresh immediately
-    print("[STARTUP] Running initial index...")
-    incremental_index()
-
-    # Start the full service
     observer, stop_event = start_indexing_service()
-
-    print("\n[STARTUP] Service running. Press Ctrl+C to stop.\n")
+    print(f"\n[STARTUP] Monitoring: {DOC_FOLDER}")
+    print("[STARTUP] Press Ctrl+C to stop.\n")
 
     try:
         while True:
