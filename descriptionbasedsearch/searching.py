@@ -21,6 +21,13 @@ try:
 except ImportError:
     pass
 
+# -------- LOAD AUDIT LOGGER --------
+try:
+    from auth import log_search
+    auth_available = True
+except ImportError:
+    auth_available = False
+
 
 def cosine_similarity(a, b):
     return np.dot(a, b) / (norm(a) * norm(b))
@@ -50,14 +57,19 @@ def search_documents(query: str):
     )
 
 
-def run_search(query: str, mode: str = "both"):
+def run_search(query: str, mode: str = "both", session=None):
     """
     Unified search entry point for GUI and CLI.
 
-    mode: "documents" — text documents only (SBERT)
-          "images"    — images only (CLIP + face)
-          "both"      — everything merged and ranked together
+    query:   what the user typed
+    mode:    "documents" / "images" / "both"
+    session: optional Session object from auth.py — used for audit logging
+             and session refresh on every search action
     """
+    # Refresh session on every search so timeout resets
+    if session is not None:
+        session.refresh()
+
     results = []
 
     if mode in ("documents", "both"):
@@ -67,15 +79,25 @@ def run_search(query: str, mode: str = "both"):
         if image_search_available:
             results += search_images(query)
         elif mode == "images":
-            print("[WARN] Image search not available — check image_search.py is present.")
+            print("[WARN] Image search not available.")
 
-    # Sort all results together by score descending
+    # Sort all results together by score
     results.sort(reverse=True)
+
+    # Log to audit trail if auth is available and session provided
+    if auth_available and session is not None:
+        log_search(
+            username=session.username,
+            query=query,
+            mode=mode,
+            result_count=len(results)
+        )
+
     return results
 
 
 def display_results(results, top_n=3):
-    """Print results with confidence labels. Used by CLI and can be used by GUI."""
+    """Print results with confidence labels."""
     if not results:
         print("No results found.")
         return
@@ -96,12 +118,46 @@ def display_results(results, top_n=3):
         print(f"  [{confidence}][{result_type}] {score:.3f} → {path}")
 
 
-# -------- RUN DIRECTLY (CLI mode) --------
+# -------- CLI MODE --------
 if __name__ == "__main__":
-    query   = input("Enter search query: ")
-    mode    = input("Search [documents / images / both]: ").strip().lower()
-    if mode not in ("documents", "images", "both"):
-        mode = "both"
+    from auth import verify_login, Session, log_logout
 
-    results = run_search(query, mode=mode)
-    display_results(results)
+    # Simple CLI login
+    print("=" * 40)
+    print("  Corporate Document Search System")
+    print("=" * 40)
+
+    username = input("\nUsername: ").strip()
+    password = input("Password: ").strip()
+
+    result = verify_login(username, password)
+
+    if not result["success"]:
+        print(f"\nLogin failed: {result['reason']}")
+        exit(1)
+
+    session = Session(result["username"], result["role"])
+    print(f"\nWelcome, {session.username} ({session.role})")
+    print("Type 'quit' to exit.\n")
+
+    while True:
+        if not session.is_valid():
+            print("\nSession expired. Please log in again.")
+            break
+
+        query = input("Search query: ").strip()
+        if query.lower() == "quit":
+            break
+        if not query:
+            continue
+
+        mode = input("Mode [documents/images/both] (default: both): ").strip().lower()
+        if mode not in ("documents", "images", "both"):
+            mode = "both"
+
+        results = run_search(query, mode=mode, session=session)
+        display_results(results)
+        print()
+
+    log_logout(session.username)
+    print("Logged out.")
