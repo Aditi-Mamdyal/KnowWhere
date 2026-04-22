@@ -1,403 +1,1178 @@
 """
-gui_dark.py  —  KnowWhere  (Dark Theme)
-FIXES:
-  1. Change password: grab_set()+transient() so button always clickable
-  2. Results are clickable — click path to open file
-  3. os.chdir at startup fixes launch.bat indexing issue
+gui.py
+======
+Main GUI for the Corporate Document Search System.
+Built with Tkinter — no extra GUI library needed.
+
+SCREENS:
+  1. Login Screen       — username + password
+  2. Search Screen      — document / image / both search with results
+  3. Admin Panel        — create/delete/list users (admin only)
+  4. Change Password    — available to all users from settings
+
+USAGE:
+  python gui.py
+
+HOW IT INTEGRATES:
+  - Calls start_indexing_service() on startup (background indexing)
+  - Calls run_search(query, mode, session) for search
+  - Calls verify_login(), create_user(), delete_user() for auth
+  - Calls stop_indexing_service() on window close
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
+from tkinter import ttk, messagebox, scrolledtext, filedialog
 import threading
 import os
+import sys
+import shutil
 
-# FIX 4: Set working directory to project folder so all relative paths work
-# when launched via .bat or desktop shortcut (not just VS Code)
+# Fix CWD so all relative paths work from VS Code, .bat, or desktop shortcut
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
-from auth import (verify_login, create_user, delete_user, list_users,
-                  change_password, log_logout, Session)
+# -------- BACKEND IMPORTS --------
+from auth import (
+    verify_login, create_user, delete_user, list_users,
+    change_password, log_logout, Session
+)
 from searching import run_search
 from indexing_service import start_indexing_service, stop_indexing_service
+from indexing import get_doc_folder, save_doc_folder, is_setup_complete, incremental_index
 
-# ── COLOURS ────────────────────────────────────────────────────────────────────
-BG_DARK=  "#0f1117"; BG_CARD="#1a1d27"; BG_INPUT="#252836"
-ACCENT=   "#4f8ef7"; ACCENT_HOVER="#3a7be0"; ACCENT_ADMIN="#f7a44f"
-TEXT_PRIMARY="#e8eaf0"; TEXT_MUTED="#7a7f94"; TEXT_SUCCESS="#4fba74"
-TEXT_WARN="#f7c44f"; TEXT_ERROR="#f74f4f"; BORDER="#2e3146"
-RESULT_DOC="#4f8ef7"; RESULT_IMG="#a44ff7"; CLICKABLE="#4fba74"
+try:
+    from face_search import add_reference_photo, list_registered_people, FACE_DB_PATH
+    FACE_SEARCH_AVAILABLE = True
+except ImportError:
+    FACE_SEARCH_AVAILABLE = False
 
-FONT_TITLE=("Georgia",22,"bold"); FONT_SUB=("Georgia",13)
-FONT_BODY=("Consolas",11); FONT_SMALL=("Consolas",9)
-FONT_LABEL=("Consolas",11,"bold"); FONT_BTN=("Consolas",11,"bold")
+# -------- THEME --------
+BG_DARK      = "#0f1117"
+BG_CARD      = "#1a1d27"
+BG_INPUT     = "#252836"
+ACCENT       = "#4f8ef7"
+ACCENT_HOVER = "#3a7be0"
+ACCENT_ADMIN = "#f7a44f"
+TEXT_PRIMARY = "#e8eaf0"
+TEXT_MUTED   = "#7a7f94"
+TEXT_SUCCESS = "#4fba74"
+TEXT_WARN    = "#f7c44f"
+TEXT_ERROR   = "#f74f4f"
+BORDER       = "#2e3146"
+FONT_TITLE   = ("Georgia", 22, "bold")
+FONT_SUB     = ("Georgia", 13)
+FONT_BODY    = ("Consolas", 11)
+FONT_SMALL   = ("Consolas", 9)
+FONT_LABEL   = ("Consolas", 11, "bold")
+FONT_BTN     = ("Consolas", 11, "bold")
+RESULT_DOC   = "#4f8ef7"
+RESULT_IMG   = "#a44ff7"
 
-# ── HELPERS ────────────────────────────────────────────────────────────────────
+# =============================================================================
+# HELPER WIDGETS
+# =============================================================================
+
 def styled_entry(parent, show=None, width=30):
-    return tk.Entry(parent, show=show, width=width, bg=BG_INPUT, fg=TEXT_PRIMARY,
-                    insertbackground=TEXT_PRIMARY, relief="flat", font=FONT_BODY,
-                    highlightthickness=1, highlightbackground=BORDER, highlightcolor=ACCENT)
+    e = tk.Entry(
+        parent, show=show, width=width,
+        bg=BG_INPUT, fg=TEXT_PRIMARY,
+        insertbackground=TEXT_PRIMARY,
+        relief="flat", font=FONT_BODY,
+        highlightthickness=1,
+        highlightbackground=BORDER,
+        highlightcolor=ACCENT
+    )
+    return e
 
-def styled_button(parent, text, command, color=ACCENT, hover_color=ACCENT_HOVER, width=18):
-    btn = tk.Button(parent, text=text, command=command, bg=color, fg=TEXT_PRIMARY,
-                    activebackground=hover_color, activeforeground=TEXT_PRIMARY,
-                    relief="flat", font=FONT_BTN, cursor="hand2", width=width, pady=6)
+def styled_button(parent, text, command, color=ACCENT,
+                  hover_color=ACCENT_HOVER, width=18):
+    btn = tk.Button(
+        parent, text=text, command=command,
+        bg=color, fg=TEXT_PRIMARY,
+        activebackground=hover_color,
+        activeforeground=TEXT_PRIMARY,
+        relief="flat", font=FONT_BTN,
+        cursor="hand2", width=width,
+        pady=6
+    )
     btn.bind("<Enter>", lambda e: btn.config(bg=hover_color))
     btn.bind("<Leave>", lambda e: btn.config(bg=color))
     return btn
 
-# ── LOGIN ──────────────────────────────────────────────────────────────────────
+def label(parent, text, font=FONT_BODY, color=TEXT_PRIMARY, **kw):
+    return tk.Label(
+        parent, text=text, bg=BG_DARK,
+        fg=color, font=font, **kw
+    )
+
+def card_label(parent, text, font=FONT_BODY, color=TEXT_PRIMARY, **kw):
+    return tk.Label(
+        parent, text=text, bg=BG_CARD,
+        fg=color, font=font, **kw
+    )
+
+# =============================================================================
+# SCREEN 1 — LOGIN
+# =============================================================================
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# SETUP SCREEN — shown only on first run
+# ═══════════════════════════════════════════════════════════════════════════════
+
+class SetupScreen(tk.Frame):
+    def __init__(self, master, on_complete):
+        super().__init__(master, bg=BG_DARK)
+        self.on_complete = on_complete
+        self._build()
+
+    def _build(self):
+        self.columnconfigure(0, weight=1); self.rowconfigure(0, weight=1)
+        card = tk.Frame(self, bg=BG_CARD, padx=52, pady=44,
+                        highlightthickness=1, highlightbackground=BORDER)
+        card.grid(row=0, column=0)
+        tk.Label(card, text="⬡", bg=BG_CARD, fg=ACCENT,
+                 font=("Georgia", 36)).pack(pady=(0, 4))
+        tk.Label(card, text="KnowWhere", bg=BG_CARD,
+                 fg=TEXT_PRIMARY, font=FONT_TITLE).pack()
+        tk.Label(card, text="First Time Setup", bg=BG_CARD,
+                 fg=ACCENT, font=("Georgia", 13)).pack(pady=(2, 0))
+        tk.Label(card, text="Choose the folder containing your documents and images.",
+                 bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(pady=(4, 28))
+        tk.Label(card, text="DOCUMENTS FOLDER", bg=BG_CARD,
+                 fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
+        pr = tk.Frame(card, bg=BG_CARD); pr.pack(fill="x", pady=(4, 6))
+        self.path_entry = styled_entry(pr, width=30)
+        self.path_entry.pack(side="left", ipady=6, fill="x", expand=True)
+        styled_button(pr, "Browse", self._browse, color=BG_INPUT,
+                      hover_color=BORDER, width=8).pack(side="left", padx=(8, 0))
+        tk.Label(card, text="All subfolders will be included automatically.",
+                 bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w", pady=(0, 16))
+        self.msg = tk.Label(card, text="", bg=BG_CARD, fg=TEXT_ERROR, font=FONT_SMALL)
+        self.msg.pack(pady=(0, 10))
+        self.confirm_btn = styled_button(card, "Start Indexing →", self._confirm, width=28)
+        self.confirm_btn.pack(ipady=2, fill="x")
+        self.prog_frame = tk.Frame(card, bg=BG_CARD); self.prog_frame.pack(fill="x", pady=(16, 0))
+        self.prog_lbl = tk.Label(self.prog_frame, text="", bg=BG_CARD,
+                                 fg=TEXT_SUCCESS, font=FONT_SMALL)
+        self.prog_lbl.pack()
+        self.prog_bar = ttk.Progressbar(self.prog_frame, mode="indeterminate", length=340)
+        tk.Label(card, text="You can change this folder later from the Admin Panel.",
+                 bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(pady=(14, 0))
+
+    def _browse(self):
+        f = filedialog.askdirectory(title="Select documents folder")
+        if f:
+            self.path_entry.delete(0, tk.END); self.path_entry.insert(0, f)
+            self.msg.config(text="")
+
+    def _confirm(self):
+        path = self.path_entry.get().strip()
+        if not path: self.msg.config(text="Please select a folder first."); return
+        if not os.path.isdir(path): self.msg.config(text="Folder does not exist."); return
+        save_doc_folder(path)
+        try:
+            import image_indexing; image_indexing.DOC_FOLDER = path
+        except ImportError: pass
+        self.confirm_btn.config(state="disabled", text="Indexing...")
+        self.prog_lbl.config(text="Building index... this may take a few minutes.")
+        self.prog_bar.pack(pady=(6, 0)); self.prog_bar.start(12)
+        threading.Thread(target=self._run_index, daemon=True).start()
+
+    def _run_index(self):
+        try:
+            incremental_index()
+            try:
+                from image_indexing import index_images; index_images()
+            except Exception: pass
+        except Exception as e:
+            print(f"[SETUP] Error: {e}")
+        self.after(0, self._done)
+
+    def _done(self):
+        self.prog_bar.stop()
+        self.prog_lbl.config(text="✓ Index built successfully!", fg=TEXT_SUCCESS)
+        self.after(1200, self.on_complete)
+
+
 class LoginScreen(tk.Frame):
+
     def __init__(self, master, on_login_success):
         super().__init__(master, bg=BG_DARK)
         self.on_login_success = on_login_success
         self._build()
 
     def _build(self):
-        self.columnconfigure(0, weight=1); self.rowconfigure(0, weight=1)
+        # Center everything
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
         card = tk.Frame(self, bg=BG_CARD, padx=48, pady=42,
-                        highlightthickness=1, highlightbackground=BORDER)
+                        highlightthickness=1,
+                        highlightbackground=BORDER)
         card.grid(row=0, column=0)
 
-        tk.Label(card, text="⬡", bg=BG_CARD, fg=ACCENT, font=("Georgia",36)).pack(pady=(0,4))
-        tk.Label(card, text="KnowWhere", bg=BG_CARD, fg=TEXT_PRIMARY, font=FONT_TITLE).pack()
+        # Logo / title
+        tk.Label(card, text="⬡", bg=BG_CARD, fg=ACCENT,
+                 font=("Georgia", 36)).pack(pady=(0, 4))
+        tk.Label(card, text="KnowWhere",
+                 bg=BG_CARD, fg=TEXT_PRIMARY,
+                 font=FONT_TITLE).pack()
         tk.Label(card, text="Corporate Document & Image Search",
-                 bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(pady=(2,28))
+                 bg=BG_CARD, fg=TEXT_MUTED,
+                 font=FONT_SMALL).pack(pady=(2, 28))
 
-        tk.Label(card, text="USERNAME", bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
-        self.u = styled_entry(card, width=32)
-        self.u.pack(pady=(2,14), ipady=6, fill="x")
+        # Username
+        tk.Label(card, text="USERNAME", bg=BG_CARD,
+                 fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
+        self.username_entry = styled_entry(card, width=32)
+        self.username_entry.pack(pady=(2, 14), ipady=6, fill="x")
 
-        tk.Label(card, text="PASSWORD", bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
-        self.p = styled_entry(card, show="●", width=32)
-        self.p.pack(pady=(2,6), ipady=6, fill="x")
+        # Password
+        tk.Label(card, text="PASSWORD", bg=BG_CARD,
+                 fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
+        self.password_entry = styled_entry(card, show="●", width=32)
+        self.password_entry.pack(pady=(2, 6), ipady=6, fill="x")
 
-        self.err = tk.Label(card, text="", bg=BG_CARD, fg=TEXT_ERROR, font=FONT_SMALL)
-        self.err.pack(pady=(0,16))
+        # Error label (hidden until needed)
+        self.error_label = tk.Label(
+            card, text="", bg=BG_CARD,
+            fg=TEXT_ERROR, font=FONT_SMALL
+        )
+        self.error_label.pack(pady=(0, 16))
 
-        styled_button(card, "LOGIN", self._login, width=32).pack(ipady=2, fill="x")
+        # Login button
+        btn = styled_button(card, "LOGIN", self._attempt_login, width=32)
+        btn.pack(ipady=2, fill="x")
+
         tk.Label(card, text="Contact IT admin if you need an account.",
-                 bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(pady=(18,0))
+                 bg=BG_CARD, fg=TEXT_MUTED,
+                 font=FONT_SMALL).pack(pady=(18, 0))
 
-        self.p.bind("<Return>", lambda e: self._login())
-        self.u.bind("<Return>", lambda e: self.p.focus())
-        self.u.focus()
+        # Enter key triggers login
+        self.password_entry.bind("<Return>", lambda e: self._attempt_login())
+        self.username_entry.bind("<Return>", lambda e: self.password_entry.focus())
 
-    def _login(self):
-        r = verify_login(self.u.get().strip(), self.p.get().strip())
-        if r["success"]:
-            self.on_login_success(Session(r["username"], r["role"]))
+        # Auto-focus username
+        self.username_entry.focus()
+
+    def _attempt_login(self):
+        username = self.username_entry.get().strip()
+        password = self.password_entry.get().strip()
+
+        result = verify_login(username, password)
+
+        if result["success"]:
+            session = Session(result["username"], result["role"])
+            self.on_login_success(session)
         else:
-            self.err.config(text=r["reason"])
-            self.p.delete(0, tk.END); self.p.focus()
+            self.error_label.config(text=result["reason"])
+            self.password_entry.delete(0, tk.END)
+            self.password_entry.focus()
 
-# ── SEARCH SCREEN ──────────────────────────────────────────────────────────────
+# =============================================================================
+# SCREEN 2 — MAIN SEARCH
+# =============================================================================
+
 class SearchScreen(tk.Frame):
-    def __init__(self, master, session, on_logout, on_admin, on_chpw, status_var):
+
+    def __init__(self, master, session, on_logout,
+                 on_admin_panel, on_change_password,
+                 status_var):
         super().__init__(master, bg=BG_DARK)
-        self.session=session; self.on_logout=on_logout; self.on_admin=on_admin
-        self.on_chpw=on_chpw; self.status_var=status_var
-        self.mode=tk.StringVar(value="both")
-        self._paths=[]   # parallel list of paths matching clickable tag ranges
+        self.session          = session
+        self.on_logout        = on_logout
+        self.on_admin_panel   = on_admin_panel
+        self.on_change_password = on_change_password
+        self.status_var       = status_var
+        self.search_mode      = tk.StringVar(value="both")
         self._build()
 
     def _build(self):
-        self.columnconfigure(0, weight=1); self.rowconfigure(1, weight=1)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(1, weight=1)
 
-        # topbar
-        tb = tk.Frame(self, bg=BG_CARD, highlightthickness=1, highlightbackground=BORDER)
-        tb.grid(row=0, column=0, sticky="ew"); tb.columnconfigure(1, weight=1)
-        tk.Label(tb, text="⬡  KnowWhere", bg=BG_CARD, fg=ACCENT,
-                 font=("Georgia",14,"bold"), padx=20, pady=12).grid(row=0, column=0, sticky="w")
-        tk.Label(tb, textvariable=self.status_var, bg=BG_CARD, fg=TEXT_MUTED,
+        # ---- TOP BAR ----
+        topbar = tk.Frame(self, bg=BG_CARD,
+                          highlightthickness=1,
+                          highlightbackground=BORDER)
+        topbar.grid(row=0, column=0, sticky="ew", padx=0, pady=0)
+        topbar.columnconfigure(1, weight=1)
+
+        tk.Label(topbar, text="⬡  KnowWhere",
+                 bg=BG_CARD, fg=ACCENT,
+                 font=("Georgia", 14, "bold"),
+                 padx=20, pady=12).grid(row=0, column=0, sticky="w")
+
+        # Status label in center
+        tk.Label(topbar, textvariable=self.status_var,
+                 bg=BG_CARD, fg=TEXT_MUTED,
                  font=FONT_SMALL).grid(row=0, column=1)
 
-        right = tk.Frame(tb, bg=BG_CARD, padx=16); right.grid(row=0, column=2, sticky="e")
-        rc = ACCENT_ADMIN if self.session.is_admin() else TEXT_MUTED
-        tk.Label(right, text=f"  {self.session.username}  [{self.session.role}]",
-                 bg=BG_CARD, fg=rc, font=FONT_SMALL).pack(side="left", padx=4)
+        # Right side — user info + buttons
+        right = tk.Frame(topbar, bg=BG_CARD, padx=16)
+        right.grid(row=0, column=2, sticky="e")
+
+        role_color = ACCENT_ADMIN if self.session.is_admin() else TEXT_MUTED
+        tk.Label(right,
+                 text=f"  {self.session.username}  [{self.session.role}]",
+                 bg=BG_CARD, fg=role_color,
+                 font=FONT_SMALL).pack(side="left", padx=4)
+
         if self.session.is_admin():
-            styled_button(right, "Admin Panel", self.on_admin,
-                          color=ACCENT_ADMIN, hover_color="#e0933a", width=12).pack(side="left", padx=4)
-        styled_button(right, "Change Password", self.on_chpw,
-                      color=BG_INPUT, hover_color=BORDER, width=16).pack(side="left", padx=4)
-        styled_button(right, "Logout", self.on_logout,
-                      color="#3a2020", hover_color="#5a2e2e", width=8).pack(side="left", padx=4)
+            styled_button(
+                right, "Admin Panel", self.on_admin_panel,
+                color=ACCENT_ADMIN, hover_color="#e0933a", width=12
+            ).pack(side="left", padx=4)
 
-        # middle
-        mid = tk.Frame(self, bg=BG_DARK, padx=32, pady=24)
-        mid.grid(row=1, column=0, sticky="nsew")
-        mid.columnconfigure(0, weight=1); mid.rowconfigure(2, weight=1)
+        styled_button(
+            right, "Change Password", self.on_change_password,
+            color=BG_INPUT, hover_color=BORDER, width=16
+        ).pack(side="left", padx=4)
 
-        sb = tk.Frame(mid, bg=BG_CARD, highlightthickness=1, highlightbackground=BORDER)
-        sb.grid(row=0, column=0, sticky="ew", pady=(0,12)); sb.columnconfigure(0, weight=1)
+        styled_button(
+            right, "Logout", self.on_logout,
+            color="#3a2020", hover_color="#5a2e2e", width=8
+        ).pack(side="left", padx=4)
 
-        self.q = tk.Entry(sb, bg=BG_CARD, fg=TEXT_PRIMARY, insertbackground=TEXT_PRIMARY,
-                          relief="flat", font=("Georgia",14), highlightthickness=0)
-        self.q.grid(row=0, column=0, sticky="ew", padx=20, pady=14, ipady=4)
-        self.q.insert(0, "Describe what you're looking for..."); self.q.config(fg=TEXT_MUTED)
+        # ---- SEARCH AREA ----
+        middle = tk.Frame(self, bg=BG_DARK, padx=32, pady=24)
+        middle.grid(row=1, column=0, sticky="nsew")
+        middle.columnconfigure(0, weight=1)
+        middle.rowconfigure(2, weight=1)
 
-        def fi(e):
-            if self.q.get()=="Describe what you're looking for...":
-                self.q.delete(0,tk.END); self.q.config(fg=TEXT_PRIMARY)
-        def fo(e):
-            if not self.q.get():
-                self.q.insert(0,"Describe what you're looking for..."); self.q.config(fg=TEXT_MUTED)
-        self.q.bind("<FocusIn>",fi); self.q.bind("<FocusOut>",fo)
-        self.q.bind("<Return>", lambda e: self._search())
-        styled_button(sb, "Search", self._search, width=10).grid(row=0, column=1, padx=8, pady=8)
+        # Search bar
+        search_bar = tk.Frame(middle, bg=BG_CARD,
+                              highlightthickness=1,
+                              highlightbackground=BORDER)
+        search_bar.grid(row=0, column=0, sticky="ew", pady=(0, 12))
+        search_bar.columnconfigure(0, weight=1)
 
-        mf = tk.Frame(mid, bg=BG_DARK); mf.grid(row=1, column=0, sticky="w", pady=(0,16))
-        tk.Label(mf, text="Search in:", bg=BG_DARK, fg=TEXT_MUTED, font=FONT_SMALL).pack(side="left", padx=(0,10))
-        for val,lbl in [("both","All"),("documents","Documents"),("images","Images")]:
-            tk.Radiobutton(mf, text=lbl, variable=self.mode, value=val, bg=BG_DARK,
-                           fg=TEXT_PRIMARY, selectcolor=BG_INPUT, activebackground=BG_DARK,
-                           activeforeground=ACCENT, font=FONT_SMALL, cursor="hand2").pack(side="left", padx=8)
+        self.query_entry = tk.Entry(
+            search_bar, bg=BG_CARD, fg=TEXT_PRIMARY,
+            insertbackground=TEXT_PRIMARY,
+            relief="flat", font=("Georgia", 14),
+            highlightthickness=0
+        )
+        self.query_entry.grid(row=0, column=0, sticky="ew",
+                              padx=20, pady=14, ipady=4)
+        self.query_entry.insert(0, "Describe what you're looking for...")
+        self.query_entry.config(fg=TEXT_MUTED)
 
-        rf = tk.Frame(mid, bg=BG_CARD, highlightthickness=1, highlightbackground=BORDER)
-        rf.grid(row=2, column=0, sticky="nsew"); rf.rowconfigure(0,weight=1); rf.columnconfigure(0,weight=1)
+        def on_focus_in(e):
+            if self.query_entry.get() == "Describe what you're looking for...":
+                self.query_entry.delete(0, tk.END)
+                self.query_entry.config(fg=TEXT_PRIMARY)
 
-        self.txt = scrolledtext.ScrolledText(rf, bg=BG_CARD, fg=TEXT_PRIMARY, font=FONT_BODY,
-                                             relief="flat", state="disabled", wrap="word",
-                                             padx=20, pady=16, spacing1=4, spacing2=2, cursor="arrow")
-        self.txt.grid(row=0, column=0, sticky="nsew")
+        def on_focus_out(e):
+            if not self.query_entry.get():
+                self.query_entry.insert(0, "Describe what you're looking for...")
+                self.query_entry.config(fg=TEXT_MUTED)
 
-        self.txt.tag_config("strong",   foreground=TEXT_SUCCESS)
-        self.txt.tag_config("moderate", foreground=TEXT_WARN)
-        self.txt.tag_config("weak",     foreground=TEXT_MUTED)
-        self.txt.tag_config("doc_tag",  foreground=RESULT_DOC)
-        self.txt.tag_config("img_tag",  foreground=RESULT_IMG)
-        self.txt.tag_config("path",     foreground=TEXT_PRIMARY)
-        self.txt.tag_config("warning",  foreground=TEXT_ERROR)
-        self.txt.tag_config("header",   foreground=ACCENT, font=("Consolas",11,"bold"))
-        # FIX 2: clickable paths
-        self.txt.tag_config("clickable", foreground=CLICKABLE, underline=True)
-        self.txt.tag_bind("clickable", "<Button-1>", self._click)
-        self.txt.tag_bind("clickable", "<Enter>",  lambda e: self.txt.config(cursor="hand2"))
-        self.txt.tag_bind("clickable", "<Leave>",  lambda e: self.txt.config(cursor="arrow"))
+        self.query_entry.bind("<FocusIn>", on_focus_in)
+        self.query_entry.bind("<FocusOut>", on_focus_out)
+        self.query_entry.bind("<Return>", lambda e: self._do_search())
 
-        self._welcome()
+        self._search_btn = styled_button(
+            search_bar, "Search", self._do_search, width=10
+        )
+        self._search_btn.grid(row=0, column=1, padx=8, pady=8)
 
-    def _welcome(self):
-        self.txt.config(state="normal")
-        self.txt.insert("end","Welcome to KnowWhere\n\n","header")
-        self.txt.insert("end",
-            "Type a natural language description in the search bar.\n"
-            "Examples:\n  • budget report Q3\n  • tictalk counselling website\n"
-            "  • photo of team meeting\n  • excel sheet with student marks\n\n"
-            "Click any green path to open the file directly.\n","weak")
-        self.txt.config(state="disabled")
+        # Mode selector
+        mode_frame = tk.Frame(middle, bg=BG_DARK)
+        mode_frame.grid(row=1, column=0, sticky="w", pady=(0, 16))
 
-    def _search(self):
-        q = self.q.get().strip()
-        if not q or q=="Describe what you're looking for...": return
+        tk.Label(mode_frame, text="Search in:",
+                 bg=BG_DARK, fg=TEXT_MUTED,
+                 font=FONT_SMALL).pack(side="left", padx=(0, 10))
+
+        for mode_val, mode_lbl in [
+            ("both", "All"),
+            ("documents", "Documents"),
+            ("images", "Images")
+        ]:
+            rb = tk.Radiobutton(
+                mode_frame,
+                text=mode_lbl,
+                variable=self.search_mode,
+                value=mode_val,
+                bg=BG_DARK, fg=TEXT_PRIMARY,
+                selectcolor=BG_INPUT,
+                activebackground=BG_DARK,
+                activeforeground=ACCENT,
+                font=FONT_SMALL,
+                cursor="hand2"
+            )
+            rb.pack(side="left", padx=8)
+
+        # Results area
+        results_frame = tk.Frame(middle, bg=BG_CARD,
+                                 highlightthickness=1,
+                                 highlightbackground=BORDER)
+        results_frame.grid(row=2, column=0, sticky="nsew")
+        results_frame.rowconfigure(0, weight=1)
+        results_frame.columnconfigure(0, weight=1)
+
+        self.results_text = scrolledtext.ScrolledText(
+            results_frame,
+            bg=BG_CARD, fg=TEXT_PRIMARY,
+            font=FONT_BODY,
+            relief="flat",
+            state="disabled",
+            wrap="word",
+            padx=20, pady=16,
+            spacing1=4, spacing2=2
+        )
+        self.results_text.grid(row=0, column=0, sticky="nsew")
+
+        # Configure text tags for coloured output
+        self.results_text.tag_config("strong",   foreground=TEXT_SUCCESS)
+        self.results_text.tag_config("moderate", foreground=TEXT_WARN)
+        self.results_text.tag_config("weak",     foreground=TEXT_MUTED)
+        self.results_text.tag_config("doc_tag",  foreground=RESULT_DOC)
+        self.results_text.tag_config("img_tag",  foreground=RESULT_IMG)
+        self.results_text.tag_config("path",     foreground=TEXT_PRIMARY)
+        self.results_text.tag_config("warning",  foreground=TEXT_ERROR)
+        self.results_text.tag_config("header",   foreground=ACCENT,
+                                     font=("Consolas", 11, "bold"))
+        # Clickable filename tag — green + hand cursor
+        self.results_text.tag_config("clickable",
+                                     foreground="#4fba74",
+                                     font=("Consolas", 11, "underline"))
+        self.results_text.tag_config("clickable_hover",
+                                     foreground="#6fd494",
+                                     font=("Consolas", 11, "underline"))
+
+        self._write_welcome()
+
+    def _write_welcome(self):
+        self._set_text_enabled()
+        self.results_text.insert("end",
+            "Welcome to KnowWhere\n\n", "header")
+        self.results_text.insert("end",
+            "Type a natural language description in the search bar above.\n"
+            "Examples:\n"
+            "  • budget report for Q3\n"
+            "  • tictalk counselling booking website\n"
+            "  • photo of team meeting\n"
+            "  • excel sheet with student marks\n\n",
+            "weak")
+        self._set_text_disabled()
+
+    def _set_text_enabled(self):
+        self.results_text.config(state="normal")
+
+    def _set_text_disabled(self):
+        self.results_text.config(state="disabled")
+
+    def _do_search(self):
+        query = self.query_entry.get().strip()
+        if not query or query == "Describe what you're looking for...":
+            return
+
         if not self.session.is_valid():
-            messagebox.showwarning("Session Expired","Please log in again."); self.on_logout(); return
-        self.status_var.set("Searching..."); self._paths=[]
-        threading.Thread(target=self._thread, args=(q, self.mode.get()), daemon=True).start()
+            messagebox.showwarning(
+                "Session Expired",
+                "Your session has expired. Please log in again."
+            )
+            self.on_logout()
+            return
 
-    def _thread(self, q, mode):
+        mode = self.search_mode.get()
+
+        # Clear results and show searching state immediately
+        self._set_text_enabled()
+        self.results_text.delete("1.0", "end")
+        if mode in ("images", "both"):
+            self.results_text.insert("end",
+                "🔍  Searching...\n\n"
+                "Face recognition may take 10–30 seconds.\nPlease wait.\n",
+                "weak")
+        else:
+            self.results_text.insert("end", "🔍  Searching...\n", "weak")
+        self._set_text_disabled()
+
+        # Status bar stays "Searching..." until _display_results is called
+        self.status_var.set("🔍 Searching... please wait")
+
+        # Disable search button to prevent double submit
+        self._search_btn.config(state="disabled", text="Searching...")
+
+        threading.Thread(
+            target=self._run_search_thread,
+            args=(query, mode),
+            daemon=True
+        ).start()
+
+    def _run_search_thread(self, query, mode):
         try:
-            res = run_search(q, mode=mode, session=self.session)
-            self.after(0, self._show, q, mode, res)
+            results = run_search(query, mode=mode, session=self.session)
+            # Update GUI from main thread
+            self.after(0, self._display_results, query, mode, results)
         except Exception as e:
-            self.after(0, self._err, str(e))
+            self.after(0, self._display_error, str(e))
 
-    def _show(self, q, mode, results):
+    def _open_file(self, path):
+        """Open a file with the OS default application."""
+        try:
+            if os.name == "nt":          # Windows
+                os.startfile(path)
+            elif sys.platform == "darwin":  # macOS
+                import subprocess
+                subprocess.Popen(["open", path])
+            else:                         # Linux
+                import subprocess
+                subprocess.Popen(["xdg-open", path])
+        except Exception as e:
+            messagebox.showerror("Cannot Open File",
+                                 f"Could not open:\n{path}\n\n{e}")
+
+    def _display_results(self, query, mode, results):
+        # Only now — after results are ready — update status and re-enable button
         self.status_var.set("Status: Index up to date ✓")
-        self._paths=[]
-        self.txt.config(state="normal"); self.txt.delete("1.0","end")
-        self.txt.insert("end", f"Query: \"{q}\"  |  Mode: {mode}  |  {len(results)} results\n\n","header")
+        self._search_btn.config(state="normal", text="Search")
+        self._set_text_enabled()
+        self.results_text.delete("1.0", "end")
+
+        # Remove any per-result tags left over from a previous search
+        for tag in self.results_text.tag_names():
+            if tag.startswith("result_"):
+                self.results_text.tag_delete(tag)
+
+        self.results_text.insert("end",
+            f"Query: \"{query}\"  |  Mode: {mode}  "
+            f"|  {len(results)} results\n\n", "header")
 
         if not results:
-            self.txt.insert("end","No results found.\n","warning")
+            self.results_text.insert("end",
+                "No results found.\n", "warning")
         else:
-            if results[0][0]<0.3:
-                self.txt.insert("end","⚠  No strong matches. Showing closest results.\n\n","warning")
-            self.txt.insert("end","  Click a green path to open the file.\n\n","weak")
+            if results[0][0] < 0.3:
+                self.results_text.insert("end",
+                    "⚠  No strong matches found. "
+                    "Showing closest results.\n\n", "warning")
 
-            for i,(score,path,rtype) in enumerate(results[:10],1):
-                conf,tag = ("Strong  ","strong") if score>=0.5 else \
-                           ("Moderate","moderate") if score>=0.35 else ("Weak    ","weak")
-                tlbl = "DOC" if rtype=="document" else "IMG"
-                ttag = "doc_tag" if rtype=="document" else "img_tag"
+            for i, (score, path, result_type) in enumerate(results[:5], 1):
+                # Confidence label
+                if score >= 0.5:
+                    conf, conf_tag = "Strong  ", "strong"
+                elif score >= 0.35:
+                    conf, conf_tag = "Moderate", "moderate"
+                else:
+                    conf, conf_tag = "Weak    ", "weak"
 
-                self.txt.insert("end",f"  {i}. ","weak")
-                self.txt.insert("end",f"[{conf}]",tag)
-                self.txt.insert("end",f" [{tlbl}] ",ttag)
-                self.txt.insert("end",f"{score:.3f}  ","weak")
-                self.txt.insert("end",f"{os.path.basename(path)}\n","path")
-                self.txt.insert("end",f"       {path}\n\n","clickable")
-                self._paths.append(path)
+                type_tag = "doc_tag" if result_type == "document" else "img_tag"
+                type_lbl = "DOC" if result_type == "document" else "IMG"
 
-        self.txt.config(state="disabled")
+                # Unique tag for this result's clickable filename
+                rtag = f"result_{i}"
+                self.results_text.tag_config(rtag,
+                                             foreground="#4fba74",
+                                             font=("Consolas", 11, "underline"))
 
-    def _click(self, event):
-        idx    = self.txt.index(f"@{event.x},{event.y}")
-        ranges = self.txt.tag_ranges("clickable")
-        pairs  = [(ranges[i],ranges[i+1]) for i in range(0,len(ranges),2)]
-        for i,(s,e) in enumerate(pairs):
-            if self.txt.compare(idx,">=",s) and self.txt.compare(idx,"<",e):
-                if i < len(self._paths):
-                    p = self._paths[i]
-                    if os.path.exists(p):
-                        try: os.startfile(p)
-                        except Exception as ex: messagebox.showerror("Error",str(ex))
-                    else:
-                        messagebox.showwarning("Not Found",f"File not found:\n{p}")
-                return
+                self.results_text.insert("end", f"  {i}. ", "weak")
+                self.results_text.insert("end", f"[{conf}]", conf_tag)
+                self.results_text.insert("end", f" [{type_lbl}] ", type_tag)
+                self.results_text.insert("end", f"{score:.3f}  ", "weak")
 
-    def _err(self, msg):
+                # Clickable filename — bind click + hover on its unique tag
+                self.results_text.insert("end",
+                    f"{os.path.basename(path)}\n", (rtag, "clickable"))
+                self.results_text.insert("end",
+                    f"       {path}\n\n", "weak")
+
+                # Capture path in closure correctly
+                _path = path
+                self.results_text.tag_bind(
+                    rtag, "<Button-1>",
+                    lambda e, p=_path: self._open_file(p))
+                self.results_text.tag_bind(
+                    rtag, "<Enter>",
+                    lambda e, t=rtag: (
+                        self.results_text.config(cursor="hand2"),
+                        self.results_text.tag_config(t, foreground="#6fd494")))
+                self.results_text.tag_bind(
+                    rtag, "<Leave>",
+                    lambda e, t=rtag: (
+                        self.results_text.config(cursor=""),
+                        self.results_text.tag_config(t, foreground="#4fba74")))
+
+        self._set_text_disabled()
+
+    def _display_error(self, error_msg):
         self.status_var.set("Status: Error")
-        self.txt.config(state="normal"); self.txt.delete("1.0","end")
-        self.txt.insert("end",f"Search error:\n{msg}\n","warning")
-        self.txt.config(state="disabled")
+        self._search_btn.config(state="normal", text="Search")
+        self._set_text_enabled()
+        self.results_text.delete("1.0", "end")
+        self.results_text.insert("end",
+            f"Search error:\n{error_msg}\n", "warning")
+        self._set_text_disabled()
 
-# ── ADMIN PANEL ────────────────────────────────────────────────────────────────
+# =============================================================================
+# SCREEN 3 — ADMIN PANEL
+# =============================================================================
+
 class AdminPanel(tk.Toplevel):
+    """Opens as a separate window on top of the main app."""
+ 
     def __init__(self, master, session):
         super().__init__(master)
-        self.session=session
-        self.title("Admin Panel — KnowWhere"); self.geometry("560x520")
-        self.configure(bg=BG_DARK); self.resizable(False,False)
-        self.transient(master); self.grab_set()
-        self._build(); self._refresh()
-
-    def _build(self):
-        tk.Label(self,text="Admin Panel",bg=BG_DARK,fg=ACCENT_ADMIN,font=FONT_TITLE).pack(pady=(24,4))
-        tk.Label(self,text="Manage employee accounts",bg=BG_DARK,fg=TEXT_MUTED,font=FONT_SMALL).pack(pady=(0,20))
-
-        cc=tk.LabelFrame(self,text="  Create New User  ",bg=BG_CARD,fg=ACCENT,font=FONT_LABEL,
-                         highlightthickness=1,highlightbackground=BORDER,bd=0,padx=20,pady=16)
-        cc.pack(fill="x",padx=24,pady=(0,12))
-
-        for lt,attr,sh in [("Username:","new_u",None),("Password:","new_p","●")]:
-            r=tk.Frame(cc,bg=BG_CARD); r.pack(fill="x",pady=4)
-            tk.Label(r,text=lt,bg=BG_CARD,fg=TEXT_MUTED,font=FONT_SMALL,width=12,anchor="w").pack(side="left")
-            e=styled_entry(r,show=sh,width=20); e.pack(side="left",padx=4,ipady=4); setattr(self,attr,e)
-
-        r3=tk.Frame(cc,bg=BG_CARD); r3.pack(fill="x",pady=4)
-        tk.Label(r3,text="Role:",bg=BG_CARD,fg=TEXT_MUTED,font=FONT_SMALL,width=12,anchor="w").pack(side="left")
-        self.role=ttk.Combobox(r3,values=["user","admin"],state="readonly",width=10,font=FONT_BODY)
-        self.role.set("user"); self.role.pack(side="left",padx=4)
-
-        self.cmsg=tk.Label(cc,text="",bg=BG_CARD,fg=TEXT_SUCCESS,font=FONT_SMALL); self.cmsg.pack(pady=(4,0))
-        styled_button(cc,"Create Account",self._create,color=ACCENT_ADMIN,hover_color="#e0933a",width=20).pack(pady=(8,0))
-
-        lc=tk.LabelFrame(self,text="  Current Users  ",bg=BG_CARD,fg=ACCENT,font=FONT_LABEL,
-                         highlightthickness=1,highlightbackground=BORDER,bd=0,padx=20,pady=12)
-        lc.pack(fill="both",expand=True,padx=24,pady=(0,12))
-        self.tree=ttk.Treeview(lc,columns=("Username","Role"),show="headings",height=6,selectmode="browse")
-        for c in ("Username","Role"): self.tree.heading(c,text=c); self.tree.column(c,width=200)
-        self.tree.pack(fill="both",expand=True)
-        styled_button(lc,"Delete Selected",self._delete,color="#3a2020",hover_color="#5a2e2e",width=18).pack(pady=(10,0))
-        self.dmsg=tk.Label(lc,text="",bg=BG_CARD,fg=TEXT_ERROR,font=FONT_SMALL); self.dmsg.pack()
-
-    def _refresh(self):
-        for r in self.tree.get_children(): self.tree.delete(r)
-        res=list_users(self.session.username)
-        if res["success"]:
-            for u in res["users"]: self.tree.insert("","end",values=(u["username"],u["role"]))
-
-    def _create(self):
-        res=create_user(self.session.username,self.new_u.get().strip(),self.new_p.get().strip(),self.role.get())
-        if res["success"]:
-            self.cmsg.config(text=f"✓ '{self.new_u.get()}' created.",fg=TEXT_SUCCESS)
-            self.new_u.delete(0,tk.END); self.new_p.delete(0,tk.END); self._refresh()
-        else: self.cmsg.config(text=res["reason"],fg=TEXT_ERROR)
-
-    def _delete(self):
-        sel=self.tree.focus()
-        if not sel: self.dmsg.config(text="Select a user first.",fg=TEXT_WARN); return
-        uname=self.tree.item(sel,"values")[0]
-        if not messagebox.askyesno("Confirm",f"Delete '{uname}'?\nCannot be undone."): return
-        res=delete_user(self.session.username,uname)
-        if res["success"]: self.dmsg.config(text=f"✓ '{uname}' deleted.",fg=TEXT_SUCCESS); self._refresh()
-        else: self.dmsg.config(text=res["reason"],fg=TEXT_ERROR)
-
-# ── CHANGE PASSWORD ────────────────────────────────────────────────────────────
-class ChangePasswordDialog(tk.Toplevel):
-    def __init__(self, master, session):
-        super().__init__(master)
-        self.session=session
-        self.title("Change Password"); self.geometry("380x340")
-        self.configure(bg=BG_DARK); self.resizable(False,False)
-        # FIX 1: these two lines are the fix — dialog stays on top and focusable
-        self.transient(master); self.grab_set()
+        self.session = session
+        self.title("Admin Panel — KnowWhere")
+        self.geometry("580x750")
+        self.configure(bg=BG_DARK)
+        self.resizable(True, True)
+        self.transient(master)
+        self.grab_set()
         self._build()
-        self.after(100, self.old.focus)
+        self._refresh_user_list()
+ 
+    def _build(self):
+        tk.Label(self, text="Admin Panel",
+                 bg=BG_DARK, fg=ACCENT_ADMIN,
+                 font=FONT_TITLE).pack(pady=(24, 4))
+        tk.Label(self, text="Manage employee accounts",
+                 bg=BG_DARK, fg=TEXT_MUTED,
+                 font=FONT_SMALL).pack(pady=(0, 20))
+ 
+        # ---- Create User ----
+        create_card = tk.LabelFrame(
+            self, text="  Create New User  ",
+            bg=BG_CARD, fg=ACCENT,
+            font=FONT_LABEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            bd=0, padx=20, pady=16
+        )
+        create_card.pack(fill="x", padx=24, pady=(0, 12))
+ 
+        row1 = tk.Frame(create_card, bg=BG_CARD)
+        row1.pack(fill="x", pady=4)
+        tk.Label(row1, text="Username:", bg=BG_CARD,
+                 fg=TEXT_MUTED, font=FONT_SMALL,
+                 width=12, anchor="w").pack(side="left")
+        self.new_username = styled_entry(row1, width=20)
+        self.new_username.pack(side="left", padx=4, ipady=4)
+ 
+        row2 = tk.Frame(create_card, bg=BG_CARD)
+        row2.pack(fill="x", pady=4)
+        tk.Label(row2, text="Password:", bg=BG_CARD,
+                 fg=TEXT_MUTED, font=FONT_SMALL,
+                 width=12, anchor="w").pack(side="left")
+        self.new_password = styled_entry(row2, show="●", width=20)
+        self.new_password.pack(side="left", padx=4, ipady=4)
+ 
+        row3 = tk.Frame(create_card, bg=BG_CARD)
+        row3.pack(fill="x", pady=4)
+        tk.Label(row3, text="Role:", bg=BG_CARD,
+                 fg=TEXT_MUTED, font=FONT_SMALL,
+                 width=12, anchor="w").pack(side="left")
+        self.new_role = ttk.Combobox(
+            row3, values=["user", "admin"],
+            state="readonly", width=10,
+            font=FONT_BODY
+        )
+        self.new_role.set("user")
+        self.new_role.pack(side="left", padx=4)
+ 
+        self.create_msg = tk.Label(
+            create_card, text="", bg=BG_CARD,
+            fg=TEXT_SUCCESS, font=FONT_SMALL
+        )
+        self.create_msg.pack(pady=(4, 0))
+ 
+        styled_button(
+            create_card, "Create Account",
+            self._create_user,
+            color=ACCENT_ADMIN, hover_color="#e0933a",
+            width=20
+        ).pack(pady=(8, 0))
+ 
+        # ---- User List ----
+        list_card = tk.LabelFrame(
+            self, text="  Current Users  ",
+            bg=BG_CARD, fg=ACCENT,
+            font=FONT_LABEL,
+            highlightthickness=1,
+            highlightbackground=BORDER,
+            bd=0, padx=20, pady=12
+        )
+        list_card.pack(fill="both", expand=True,
+                       padx=24, pady=(0, 12))
+ 
+        cols = ("Username", "Role")
+        self.user_tree = ttk.Treeview(
+            list_card, columns=cols,
+            show="headings", height=6,
+            selectmode="browse"
+        )
+        for col in cols:
+            self.user_tree.heading(col, text=col)
+            self.user_tree.column(col, width=200)
+        self.user_tree.pack(fill="both", expand=True)
+ 
+        styled_button(
+            list_card, "Delete Selected",
+            self._delete_user,
+            color="#3a2020", hover_color="#5a2e2e",
+            width=18
+        ).pack(pady=(10, 0))
+ 
+        self.delete_msg = tk.Label(
+            list_card, text="", bg=BG_CARD,
+            fg=TEXT_ERROR, font=FONT_SMALL
+        )
+        self.delete_msg.pack()
+ 
+        # ---- Tools Row ----
+        tools_card = tk.LabelFrame(
+            self, text="  Tools  ",
+            bg=BG_CARD, fg=ACCENT, font=FONT_LABEL,
+            highlightthickness=1, highlightbackground=BORDER,
+            bd=0, padx=20, pady=12
+        )
+        tools_card.pack(fill="x", padx=24, pady=(0, 16))
+        tools_row = tk.Frame(tools_card, bg=BG_CARD)
+        tools_row.pack()
+        if FACE_SEARCH_AVAILABLE:
+            styled_button(
+                tools_row, "Face Registration",
+                self.open_face_management,
+                color=ACCENT, hover_color=ACCENT_HOVER, width=20
+            ).pack(side="left", padx=(0, 12))
+        styled_button(
+            tools_row, "Folder Settings",
+            self.open_folder_settings,
+            color=BG_INPUT, hover_color=BORDER, width=16
+        ).pack(side="left")
+ 
+    def _refresh_user_list(self):
+        for row in self.user_tree.get_children():
+            self.user_tree.delete(row)
+        result = list_users(self.session.username)
+        if result["success"]:
+            for u in result["users"]:
+                self.user_tree.insert(
+                    "", "end",
+                    values=(u["username"], u["role"])
+                )
+ 
+    def _create_user(self):
+        username = self.new_username.get().strip()
+        password = self.new_password.get().strip()
+        role     = self.new_role.get()
+ 
+        result = create_user(
+            self.session.username, username, password, role
+        )
+        if result["success"]:
+            self.create_msg.config(
+                text=f"✓ Account '{username}' created.",
+                fg=TEXT_SUCCESS
+            )
+            self.new_username.delete(0, tk.END)
+            self.new_password.delete(0, tk.END)
+            self._refresh_user_list()
+        else:
+            self.create_msg.config(
+                text=result["reason"], fg=TEXT_ERROR
+            )
+ 
+    def _delete_user(self):
+        selected = self.user_tree.focus()
+        if not selected:
+            self.delete_msg.config(
+                text="Select a user first.", fg=TEXT_WARN
+            )
+            return
+ 
+        values   = self.user_tree.item(selected, "values")
+        username = values[0]
+ 
+        confirm = messagebox.askyesno(
+            "Confirm Delete",
+            f"Delete account '{username}'?\nThis cannot be undone."
+        )
+        if not confirm:
+            return
+ 
+        result = delete_user(self.session.username, username)
+        if result["success"]:
+            self.delete_msg.config(
+                text=f"✓ '{username}' deleted.", fg=TEXT_SUCCESS
+            )
+            self._refresh_user_list()
+        else:
+            self.delete_msg.config(
+                text=result["reason"], fg=TEXT_ERROR
+            )
+ 
+    def open_face_management(self):
+        if not FACE_SEARCH_AVAILABLE:
+            return
+        win = tk.Toplevel(self)
+        win.title("Face Registration"); win.geometry("540x560")
+        win.configure(bg=BG_DARK)
+        win.transient(self); win.grab_set()
+ 
+        tk.Label(win, text="Face Registration", bg=BG_DARK, fg=ACCENT, font=FONT_TITLE).pack(pady=(20, 4))
+        tk.Label(win, text="Register reference photos for face search.",
+                 bg=BG_DARK, fg=TEXT_MUTED, font=FONT_SMALL).pack()
+        tk.Label(win, text="Tip: add 3-6 varied photos per person (different angles).",
+                 bg=BG_DARK, fg=TEXT_WARN, font=FONT_SMALL).pack(pady=(0, 12))
+ 
+        add_card = tk.LabelFrame(win, text="  Add Reference Photo  ",
+                                 bg=BG_CARD, fg=ACCENT, font=FONT_LABEL,
+                                 highlightthickness=1, highlightbackground=BORDER,
+                                 bd=0, padx=20, pady=14)
+        add_card.pack(fill="x", padx=16, pady=(0, 8))
+ 
+        r1 = tk.Frame(add_card, bg=BG_CARD); r1.pack(fill="x", pady=4)
+        tk.Label(r1, text="Person name:", bg=BG_CARD, fg=TEXT_MUTED,
+                 font=FONT_SMALL, width=14, anchor="w").pack(side="left")
+        face_name = styled_entry(r1, width=22)
+        face_name.pack(side="left", padx=4, ipady=4)
+ 
+        r2 = tk.Frame(add_card, bg=BG_CARD); r2.pack(fill="x", pady=4)
+        tk.Label(r2, text="Photo file:", bg=BG_CARD, fg=TEXT_MUTED,
+                 font=FONT_SMALL, width=14, anchor="w").pack(side="left")
+        face_path_e = styled_entry(r2, width=22)
+        face_path_e.pack(side="left", padx=4, ipady=4)
+ 
+        def browse_photo():
+            p = filedialog.askopenfilename(title="Select reference photo",
+                filetypes=[("Images", "*.png *.jpg *.jpeg *.webp *.bmp"), ("All", "*.*")])
+            if p: face_path_e.delete(0, tk.END); face_path_e.insert(0, p)
+ 
+        styled_button(r2, "Browse", browse_photo, color=BG_INPUT,
+                      hover_color=BORDER, width=8).pack(side="left", padx=4)
+ 
+        face_msg = tk.Label(add_card, text="", bg=BG_CARD, fg=TEXT_SUCCESS, font=FONT_SMALL)
+        face_msg.pack(pady=(4, 0))
+ 
+        def add_face():
+            name = face_name.get().strip(); photo = face_path_e.get().strip()
+            if not name: face_msg.config(text="Enter a person name.", fg=TEXT_ERROR); return
+            if not photo: face_msg.config(text="Choose a photo.", fg=TEXT_ERROR); return
+            r = add_reference_photo(name, photo)
+            if r["success"]:
+                face_msg.config(text=f"Foto added for {name}.", fg=TEXT_SUCCESS)
+                face_path_e.delete(0, tk.END); refresh_faces()
+            else:
+                face_msg.config(text=r["reason"], fg=TEXT_ERROR)
+ 
+        styled_button(add_card, "Add Reference Photo", add_face, width=22).pack(pady=(8, 0))
+ 
+        lc = tk.LabelFrame(win, text="  Registered People  ",
+                           bg=BG_CARD, fg=ACCENT, font=FONT_LABEL,
+                           highlightthickness=1, highlightbackground=BORDER,
+                           bd=0, padx=20, pady=12)
+        lc.pack(fill="both", expand=True, padx=16, pady=(0, 12))
+ 
+        ftree = ttk.Treeview(lc, columns=("Person", "Photos"), show="headings",
+                             height=6, selectmode="browse")
+        ftree.heading("Person", text="Person Name")
+        ftree.heading("Photos", text="Reference Photos")
+        ftree.column("Person", width=220); ftree.column("Photos", width=140)
+        ftree.pack(fill="both", expand=True)
+ 
+        fdmsg = tk.Label(lc, text="", bg=BG_CARD, fg=TEXT_ERROR, font=FONT_SMALL)
+        fdmsg.pack(pady=(4, 0))
+ 
+        def refresh_faces():
+            for row in ftree.get_children(): ftree.delete(row)
+            people = list_registered_people()
+            for person in sorted(people):
+                folder = os.path.join(FACE_DB_PATH, person)
+                count = len([x for x in os.listdir(folder)
+                              if x.lower().endswith((".png",".jpg",".jpeg",".webp",".bmp"))])
+                ftree.insert("", "end", values=(person, f"{count} photo(s)"))
+            if not people:
+                ftree.insert("", "end", values=("No people registered yet", "-"))
+ 
+        def remove_person():
+            sel = ftree.focus()
+            if not sel: fdmsg.config(text="Select a person first.", fg=TEXT_WARN); return
+            person = ftree.item(sel, "values")[0]
+            if person == "No people registered yet": return
+            if not messagebox.askyesno("Confirm",
+                f"Remove ALL photos for {person}?\nFace search wont recognise this person."): return
+            try:
+                import shutil; shutil.rmtree(os.path.join(FACE_DB_PATH, person))
+                fdmsg.config(text=f"{person} removed.", fg=TEXT_SUCCESS); refresh_faces()
+            except Exception as e:
+                fdmsg.config(text=f"Error: {e}", fg=TEXT_ERROR)
+ 
+        br = tk.Frame(lc, bg=BG_CARD); br.pack(pady=(8, 0))
+        styled_button(br, "Refresh", refresh_faces, color=BG_INPUT,
+                      hover_color=BORDER, width=12).pack(side="left", padx=4)
+        styled_button(br, "Remove Person", remove_person,
+                      color="#3a2020", hover_color="#5a2e2e", width=16).pack(side="left", padx=4)
+        refresh_faces()
+ 
+    def open_folder_settings(self):
+        win = tk.Toplevel(self)
+        win.title("Folder Settings"); win.geometry("500x300")
+        win.configure(bg=BG_DARK)
+        win.transient(self); win.grab_set()
+ 
+        tk.Label(win, text="Folder Settings", bg=BG_DARK,
+                 fg=ACCENT_ADMIN, font=FONT_TITLE).pack(pady=(20, 4))
+ 
+        card = tk.LabelFrame(win, text="  Documents Root Folder  ",
+                             bg=BG_CARD, fg=ACCENT, font=FONT_LABEL,
+                             highlightthickness=1, highlightbackground=BORDER,
+                             bd=0, padx=24, pady=20)
+        card.pack(fill="x", padx=16, pady=(12, 8))
+ 
+        current = get_doc_folder() or "Not set"
+        tk.Label(card, text="Current folder:", bg=BG_CARD, fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
+        cur_lbl = tk.Label(card, text=current, bg=BG_CARD, fg=TEXT_SUCCESS,
+                           font=FONT_BODY, wraplength=420, justify="left")
+        cur_lbl.pack(anchor="w", pady=(2, 14))
+ 
+        tk.Label(card, text="Change to a new folder:", bg=BG_CARD,
+                 fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
+        pr = tk.Frame(card, bg=BG_CARD); pr.pack(fill="x", pady=(4, 10))
+        new_f = styled_entry(pr, width=30)
+        new_f.pack(side="left", ipady=6, fill="x", expand=True)
+ 
+        def browse_folder():
+            f = filedialog.askdirectory()
+            if f: new_f.delete(0, tk.END); new_f.insert(0, f)
+ 
+        styled_button(pr, "Browse", browse_folder, color=BG_INPUT,
+                      hover_color=BORDER, width=8).pack(side="left", padx=(8, 0))
+ 
+        tk.Label(card, text="Warning: changes the folder, clears and rebuilds the index.",
+                 bg=BG_CARD, fg=TEXT_WARN, font=FONT_SMALL, justify="left").pack(anchor="w", pady=(0, 8))
+ 
+        fmsg = tk.Label(card, text="", bg=BG_CARD, fg=TEXT_SUCCESS, font=FONT_SMALL)
+        fmsg.pack(pady=(0, 8))
+ 
+        def apply_folder():
+            path = new_f.get().strip()
+            if not path: fmsg.config(text="Enter a folder path.", fg=TEXT_ERROR); return
+            if not os.path.isdir(path): fmsg.config(text="Folder does not exist.", fg=TEXT_ERROR); return
+            if not messagebox.askyesno("Confirm",
+                f"Change root folder to:\n{path}\n\nThis clears and rebuilds the index."): return
+            import indexing as _idx
+            try:
+                if os.path.exists(_idx.EMBED_PATH): os.remove(_idx.EMBED_PATH)
+                if os.path.exists(_idx.META_PATH): os.remove(_idx.META_PATH)
+                _idx.embeddings = _idx.np.empty((0, 384)); _idx.metadata = []
+            except Exception as e:
+                fmsg.config(text=f"Error: {e}", fg=TEXT_ERROR); return
+            save_doc_folder(path)
+            try:
+                import image_indexing; image_indexing.DOC_FOLDER = path
+            except ImportError: pass
+            cur_lbl.config(text=path)
+            fmsg.config(text="Folder updated. Index rebuilds on next scan.", fg=TEXT_SUCCESS)
+            new_f.delete(0, tk.END)
+ 
+        styled_button(card, "Apply New Folder", apply_folder,
+                      color=ACCENT_ADMIN, hover_color="#e0933a", width=22).pack()
+# =============================================================================
+# SCREEN 4 — CHANGE PASSWORD
+# =============================================================================
+
+class ChangePasswordDialog(tk.Toplevel):
+
+    def __init__(self, master, session):
+        super().__init__(master)
+        self.session = session
+        self.title("Change Password")
+        self.geometry("380x340")
+        self.configure(bg=BG_DARK)
+        self.resizable(False, False)
+        self.transient(master)
+        self.grab_set()
+        self._build()
+        self.after(100, self.old_pass.focus)
 
     def _build(self):
-        tk.Label(self,text="Change Password",bg=BG_DARK,fg=ACCENT,font=FONT_TITLE).pack(pady=(24,4))
-        tk.Label(self,text=f"Account: {self.session.username}",bg=BG_DARK,fg=TEXT_MUTED,font=FONT_SMALL).pack(pady=(0,20))
-        card=tk.Frame(self,bg=BG_CARD,padx=32,pady=24); card.pack(fill="x",padx=24)
+        tk.Label(self, text="Change Password",
+                 bg=BG_DARK, fg=ACCENT,
+                 font=FONT_TITLE).pack(pady=(24, 4))
+        tk.Label(self, text=f"Account: {self.session.username}",
+                 bg=BG_DARK, fg=TEXT_MUTED,
+                 font=FONT_SMALL).pack(pady=(0, 20))
 
-        for lt,attr in [("Current password","old"),("New password","new1"),("Confirm new","new2")]:
-            tk.Label(card,text=lt.upper(),bg=BG_CARD,fg=TEXT_MUTED,font=FONT_SMALL).pack(anchor="w")
-            e=styled_entry(card,show="●",width=28); e.pack(pady=(2,12),ipady=4,fill="x"); setattr(self,attr,e)
+        card = tk.Frame(self, bg=BG_CARD, padx=32, pady=24)
+        card.pack(fill="x", padx=24)
 
-        self.new2.bind("<Return>", lambda e: self._submit())
-        self.msg=tk.Label(card,text="",bg=BG_CARD,fg=TEXT_ERROR,font=FONT_SMALL); self.msg.pack()
-        styled_button(card,"Update Password",self._submit,width=24).pack(fill="x",pady=(8,0))
+        for lbl, attr, show in [
+            ("Current password", "old_pass", "*"),
+            ("New password",     "new_pass", "*"),
+            ("Confirm new",      "conf_pass", "*"),
+        ]:
+            tk.Label(card, text=lbl.upper(), bg=BG_CARD,
+                     fg=TEXT_MUTED, font=FONT_SMALL).pack(anchor="w")
+            entry = styled_entry(card, show=show, width=28)
+            entry.pack(pady=(2, 12), ipady=4, fill="x")
+            setattr(self, attr, entry)
 
-    def _submit(self):
-        o=self.old.get(); n=self.new1.get(); c=self.new2.get()
-        if not o or not n: self.msg.config(text="All fields required.",fg=TEXT_ERROR); return
-        if n!=c: self.msg.config(text="New passwords do not match.",fg=TEXT_ERROR); return
-        res=change_password(self.session.username,o,n)
-        if res["success"]:
-            self.msg.config(text="✓ Password updated.",fg=TEXT_SUCCESS)
-            self.after(1500,self.destroy)
-        else: self.msg.config(text=res["reason"],fg=TEXT_ERROR)
+        self.msg_label = tk.Label(
+            card, text="", bg=BG_CARD,
+            fg=TEXT_ERROR, font=FONT_SMALL
+        )
+        self.msg_label.pack()
 
-# ── APP ────────────────────────────────────────────────────────────────────────
+        self.conf_pass.bind("<Return>", lambda e: self._update())
+
+        styled_button(
+            card, "Update Password",
+            self._update, width=24
+        ).pack(fill="x", pady=(8, 0))
+
+    def _update(self):
+        old  = self.old_pass.get()
+        new  = self.new_pass.get()
+        conf = self.conf_pass.get()
+
+        # validate all fields filled
+        if not old or not new or not conf:
+            self.msg_label.config(
+                text="All fields are required.", fg=TEXT_ERROR
+            )
+            return
+
+        if new != conf:
+            self.msg_label.config(
+                text="New passwords do not match.", fg=TEXT_ERROR
+            )
+            return
+
+        if len(new) < 6:
+            self.msg_label.config(
+                text="New password must be at least 6 characters.", fg=TEXT_ERROR
+            )
+            return
+
+        result = change_password(self.session.username, old, new)
+        if result["success"]:
+            self.msg_label.config(
+                text="✓ Password updated successfully.", fg=TEXT_SUCCESS
+            )
+            self.after(1500, self.destroy)
+        else:
+            self.msg_label.config(
+                text=result["reason"], fg=TEXT_ERROR
+            )
+
+# =============================================================================
+# MAIN APP CONTROLLER
+# =============================================================================
+
 class App(tk.Tk):
+
     def __init__(self):
         super().__init__()
+
         self.title("KnowWhere — Corporate Search System")
-        self.geometry("980x680"); self.minsize(800,560); self.configure(bg=BG_DARK)
-        self.session=None; self.observer=None; self.stop_event=None
-        self.status_var=tk.StringVar(value="Starting indexing service...")
-        self.current_screen=None
-        self._start_indexing(); self._show_login()
-        self.protocol("WM_DELETE_WINDOW", self._close)
+        self.geometry("980x680")
+        self.minsize(800, 560)
+        self.configure(bg=BG_DARK)
+
+        self.session         = None
+        self.observer        = None
+        self.stop_event      = None
+        self.status_var      = tk.StringVar(value="Starting indexing service...")
+        self.current_screen  = None
+
+        # Clean shutdown on window close
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
+
+        # First run: show setup screen; otherwise go straight to login
+        if not is_setup_complete():
+            self._show_setup()
+        else:
+            self._start_indexing()
+            self._show_login()
+
+    # ---- INDEXING SERVICE ----
 
     def _start_indexing(self):
-        def go():
+        def start():
             try:
-                self.observer,self.stop_event=start_indexing_service(
-                    status_callback=lambda m: self.status_var.set(m))
-            except Exception as e: self.status_var.set(f"Indexing error: {e}")
-        threading.Thread(target=go,daemon=True).start()
+                self.status_var.set("Status: Building index...")
+                self.observer, self.stop_event = start_indexing_service(
+                    status_callback=lambda msg: self.status_var.set(msg))
+            except Exception as e:
+                self.status_var.set(f"Indexing error: {e}")
+        threading.Thread(target=start, daemon=True).start()
 
-    def _clear(self):
-        if self.current_screen: self.current_screen.destroy(); self.current_screen=None
+    def _show_setup(self):
+        self._clear_screen()
+        s = SetupScreen(self, on_complete=self._setup_done)
+        s.pack(fill="both", expand=True)
+        self.current_screen = s
+
+    def _setup_done(self):
+        self._start_indexing()
+        self._show_login()
+
+    # ---- SCREEN SWITCHING ----
+
+    def _clear_screen(self):
+        if self.current_screen:
+            self.current_screen.destroy()
+            self.current_screen = None
 
     def _show_login(self):
-        self._clear()
-        s=LoginScreen(self, on_login_success=self._logged_in)
-        s.pack(fill="both",expand=True); self.current_screen=s
+        self._clear_screen()
+        screen = LoginScreen(self, on_login_success=self._on_login_success)
+        screen.pack(fill="both", expand=True)
+        self.current_screen = screen
 
     def _show_search(self):
-        self._clear()
-        s=SearchScreen(self, session=self.session, on_logout=self._logout,
-                       on_admin=self._admin, on_chpw=self._chpw,
-                       status_var=self.status_var)
-        s.pack(fill="both",expand=True); self.current_screen=s
+        self._clear_screen()
+        screen = SearchScreen(
+            self,
+            session=self.session,
+            on_logout=self._on_logout,
+            on_admin_panel=self._open_admin_panel,
+            on_change_password=self._open_change_password,
+            status_var=self.status_var
+        )
+        screen.pack(fill="both", expand=True)
+        self.current_screen = screen
 
-    def _logged_in(self,session): self.session=session; self._show_search()
-    def _logout(self):
-        if self.session: log_logout(self.session.username)
-        self.session=None; self._show_login()
-    def _admin(self):
-        if self.session and self.session.is_admin(): AdminPanel(self,self.session)
-    def _chpw(self):
-        if self.session: ChangePasswordDialog(self,self.session)
-    def _close(self):
-        if self.session: log_logout(self.session.username)
+    # ---- EVENT HANDLERS ----
+
+    def _on_login_success(self, session):
+        self.session = session
+        self._show_search()
+
+    def _on_logout(self):
+        if self.session:
+            log_logout(self.session.username)
+        self.session = None
+        self._show_login()
+
+    def _open_admin_panel(self):
+        if self.session and self.session.is_admin():
+            AdminPanel(self, self.session)
+
+    def _open_change_password(self):
+        if self.session:
+            ChangePasswordDialog(self, self.session)
+
+    def _on_close(self):
+        if self.session:
+            log_logout(self.session.username)
         if self.observer and self.stop_event:
-            threading.Thread(target=stop_indexing_service,
-                             args=(self.observer,self.stop_event),daemon=True).start()
+            threading.Thread(
+                target=stop_indexing_service,
+                args=(self.observer, self.stop_event),
+                daemon=True
+            ).start()
         self.destroy()
 
-if __name__=="__main__":
-    App().mainloop()
+# =============================================================================
+# ENTRY POINT
+# =============================================================================
+
+if __name__ == "__main__":
+    app = App()
+    app.mainloop()

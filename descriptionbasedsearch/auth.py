@@ -28,7 +28,8 @@ import time
 from datetime import datetime
 
 # -------- CONFIG --------
-DATA_DIR        = "data"
+_ROOT          = os.path.dirname(os.path.abspath(__file__))
+DATA_DIR       = os.path.join(_ROOT, "data")
 USERS_FILE      = os.path.join(DATA_DIR, "users.json")
 AUDIT_LOG_FILE  = os.path.join(DATA_DIR, "audit.log")
 SESSION_TIMEOUT = 30 * 60   # 30 minutes in seconds

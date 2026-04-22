@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>KnowWhere – Search</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f1117; color: #e8eaf0; font-family: Consolas, monospace; }
+    nav { background: #1a1d27; border-bottom: 1px solid #2e3146;
+          padding: 14px 32px; display: flex; justify-content: space-between; align-items: center; }
+    nav .brand { font-family: Georgia, serif; font-size: 18px; color: #4f8ef7; }
+    nav .user-info { font-size: 12px; color: #7a7f94; }
+    nav a { color: #4f8ef7; text-decoration: none; font-size: 12px; margin-left: 16px; }
+    nav a:hover { color: #3a7be0; }
+    .container { max-width: 860px; margin: 40px auto; padding: 0 24px; }
+    h2 { font-size: 16px; color: #7a7f94; margin-bottom: 24px; font-weight: normal; }
+    .search-card { background: #1a1d27; border: 1px solid #2e3146;
+                   border-radius: 10px; padding: 28px 32px; margin-bottom: 28px; }
+    label { display: block; font-size: 12px; color: #7a7f94; margin-bottom: 6px; }
+    input[type=text] {
+      width: 100%; padding: 10px 14px; background: #252836; border: 1px solid #2e3146;
+      color: #e8eaf0; border-radius: 6px; font-family: Consolas, monospace;
+      font-size: 13px; margin-bottom: 16px; outline: none;
+    }
+    input:focus { border-color: #4f8ef7; }
+    select {
+      padding: 10px 14px; background: #252836; border: 1px solid #2e3146;
+      color: #e8eaf0; border-radius: 6px; font-family: Consolas, monospace;
+      font-size: 13px; margin-bottom: 20px; outline: none; width: 220px;
+    }
+    select:focus { border-color: #4f8ef7; }
+    button[type=submit] {
+      padding: 10px 28px; background: #4f8ef7; color: #fff;
+      border: none; border-radius: 6px; font-family: Consolas, monospace;
+      font-size: 13px; font-weight: bold; cursor: pointer;
+    }
+    button:hover { background: #3a7be0; }
+    .results-header { font-size: 13px; color: #7a7f94; margin-bottom: 14px; }
+    .result-item {
+      background: #1a1d27; border: 1px solid #2e3146; border-radius: 8px;
+      padding: 14px 18px; margin-bottom: 10px; display: flex;
+      justify-content: space-between; align-items: flex-start;
+    }
+    .result-item .name { font-size: 14px; color: #e8eaf0; word-break: break-all; }
+    .result-item .path { font-size: 11px; color: #7a7f94; margin-top: 4px; word-break: break-all; }
+    .badge-doc { background: #1a2a4a; color: #4f8ef7; border-radius: 4px;
+                 padding: 2px 8px; font-size: 11px; margin-left: 12px; white-space: nowrap; }
+    .badge-img { background: #2a1a4a; color: #a44ff7; border-radius: 4px;
+                 padding: 2px 8px; font-size: 11px; margin-left: 12px; white-space: nowrap; }
+    .score { font-size: 12px; color: #4fba74; margin-top: 4px; }
+    .no-results { color: #7a7f94; font-size: 13px; padding: 20px 0; }
+    .flash { background: #1a2a1a; border: 1px solid #4fba74; color: #4fba74;
+             padding: 10px 14px; border-radius: 6px; font-size: 12px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="brand">⬡ KnowWhere</span>
+    <div>
+      <span class="user-info">Logged in as: <strong>{{ username }}</strong> ({{ role }})</span>
+      {% if role == "admin" %}
+        <a href="/admin" id="admin-link">Admin Panel</a>
+      {% endif %}
+      <a href="/logout" id="logout-link">Logout</a>
+    </div>
+  </nav>
+
+  <div class="container">
+    <h2>Search your documents and images by description</h2>
+
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}<div class="flash">{{ messages[0] }}</div>{% endif %}
+    {% endwith %}
+
+    <div class="search-card">
+      <form method="POST" id="search-form">
+        <label for="query">Search Query</label>
+        <input type="text" id="query" name="query"
+               value="{{ query }}" placeholder="e.g. machine learning report, team photo, budget sheet"
+               autocomplete="off">
+
+        <label for="mode">Search Mode</label>
+        <select id="mode" name="mode">
+          <option value="documents" {% if mode == "documents" %}selected{% endif %}>Documents Only</option>
+          <option value="images"    {% if mode == "images"    %}selected{% endif %}>Images Only</option>
+          <option value="both"      {% if mode == "both"      %}selected{% endif %}>Both</option>
+        </select>
+
+        <button type="submit" id="search-btn">Search</button>
+      </form>
+    </div>
+
+    {% if query %}
+      <div class="results-header" id="result-count">
+        Found <strong>{{ result_count }}</strong> result(s) for "{{ query }}"
+      </div>
+
+      {% if results %}
+        {% for r in results %}
+          <div class="result-item">
+            <div>
+              <div class="name">{{ r.name }}</div>
+              <div class="path">{{ r.path }}</div>
+              <div class="score">Score: {{ r.score }}</div>
+            </div>
+            <span class="{{ 'badge-img' if r.type == 'image' else 'badge-doc' }}">
+              {{ r.type }}
+            </span>
+          </div>
+        {% endfor %}
+      {% else %}
+        <div class="no-results" id="no-results">No matching results found.</div>
+      {% endif %}
+    {% endif %}
+  </div>
+</body>
+</html>

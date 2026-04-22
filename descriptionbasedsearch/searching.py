@@ -1,35 +1,37 @@
 import os
+import re
 import pickle
 import numpy as np
 from sentence_transformers import SentenceTransformer
 from numpy.linalg import norm
 
-# -------- LOAD SBERT MODEL --------
-MODEL_PATH = os.path.join(os.path.dirname(__file__), "models", "all-MiniLM-L6-v2")
+_ROOT      = os.path.dirname(os.path.abspath(__file__))
+MODEL_PATH = os.path.join(_ROOT, "models", "all-MiniLM-L6-v2")
+EMBED_PATH = os.path.join(_ROOT, "data", "embeddings.npy")
+META_PATH  = os.path.join(_ROOT, "data", "documents.pkl")
+
 model = SentenceTransformer(MODEL_PATH, local_files_only=True)
 
-# -------- LOAD DOCUMENT INDEX --------
+
 def _load_doc_index():
-    embed_path = "data/embeddings.npy"
-    meta_path  = "data/documents.pkl"
-    if not os.path.exists(embed_path) or not os.path.exists(meta_path):
+    if not os.path.exists(EMBED_PATH) or not os.path.exists(META_PATH):
         return np.empty((0, 384)), []
-    emb = np.load(embed_path)
-    with open(meta_path, "rb") as f:
+    emb = np.load(EMBED_PATH)
+    # FIX: use context manager so the file handle is always closed,
+    # prevents Windows file-lock issues that blocked re-saves after indexing.
+    with open(META_PATH, "rb") as f:
         meta = pickle.load(f)
     return emb, meta
 
 embeddings, metadata = _load_doc_index()
 
-# -------- LOAD IMAGE SEARCH --------
 image_search_available = False
 try:
-    from image_search import search_images
+    from image_search import search_images, reload_index as _reload_image_index
     image_search_available = True
 except ImportError:
-    pass
+    _reload_image_index = None
 
-# -------- LOAD AUDIT LOGGER --------
 try:
     from auth import log_search
     _auth_available = True
@@ -38,31 +40,60 @@ except ImportError:
 
 
 def cosine_similarity(a, b):
-    return np.dot(a, b) / (norm(a) * norm(b))
+    n = norm(a) * norm(b)
+    return float(np.dot(a, b) / n) if n != 0 else 0.0
 
 
 def reload_doc_index():
+    """
+    Reload the document index from disk into this module's globals.
+    Called by indexing_service after every successful index run so that
+    searches immediately reflect newly added / modified / deleted files.
+    """
     global embeddings, metadata
     embeddings, metadata = _load_doc_index()
+    print(f"[SEARCH] Doc index reloaded — {len(metadata)} documents in memory.")
+
+    # Also reload image index if available
+    if _reload_image_index is not None:
+        _reload_image_index()
+        print("[SEARCH] Image index reloaded.")
 
 
-def search_documents(query: str):
+def _tokenize(text):
+    tokens = re.split(r'[\s_\-\.\,\/\\]+', text.lower())
+    result = set()
+    for t in tokens:
+        result.update(p for p in re.findall(r'[a-z]+|\d+', t) if len(p) >= 3)
+    return result
+
+
+def _filename_boost(query, filepath):
+    fname_tokens  = _tokenize(os.path.splitext(os.path.basename(filepath))[0])
+    query_tokens  = _tokenize(query)
+    if not query_tokens:
+        return 0.0
+    coverage = len(query_tokens & fname_tokens) / len(query_tokens)
+    if coverage >= 0.8: return 0.35
+    if coverage >= 0.5: return 0.20
+    if coverage >= 0.25: return 0.10
+    return 0.0
+
+
+def search_documents(query):
     if len(metadata) == 0:
         return []
     query_vec = model.encode(query)
-    raw = []
+    results   = []
     for i, doc_vec in enumerate(embeddings):
-        score = cosine_similarity(query_vec, doc_vec)
-        raw.append((score, metadata[i]["path"]))
-    raw.sort(reverse=True)
-    seen = {}
-    for score, path in raw:
-        if path not in seen or score > seen[path]:
-            seen[path] = score
-    return sorted([(s, p, "document") for p, s in seen.items()], reverse=True)
+        score = cosine_similarity(query_vec, doc_vec) + \
+                _filename_boost(query, metadata[i]["path"])
+        results.append((score, metadata[i]["path"], "document"))
+    results.sort(reverse=True)
+    return results
 
 
-def run_search(query: str, mode: str = "both", session=None):
+def run_search(query, mode="both", session=None):
     if session is not None:
         session.refresh()
     results = []

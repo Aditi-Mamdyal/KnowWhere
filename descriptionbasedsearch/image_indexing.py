@@ -7,10 +7,12 @@ import logging
 
 # Set the environment variable to avoid the Keras 3 / Transformers conflict
 os.environ["USE_TF"] = "0"
+# ── ROOT: absolute path so launch.bat works correctly ─────────────────────────
+_ROOT = os.path.dirname(os.path.abspath(__file__))
 
 # CONFIG - Aligned with your computer
 DOC_FOLDER     = r"D:\coding\college"
-DATA_DIR       = "data"
+DATA_DIR   = os.path.join(_ROOT, "data")
 EMBED_PATH     = os.path.join(DATA_DIR, "clip_embeddings.npy")
 META_PATH      = os.path.join(DATA_DIR, "clip_documents.pkl")
 MODEL_PATH     = os.path.join(os.path.dirname(__file__), "models", "clip-ViT-B-32")

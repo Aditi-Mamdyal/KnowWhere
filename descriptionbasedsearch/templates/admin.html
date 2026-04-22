@@ -1,0 +1,131 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>KnowWhere – Admin Panel</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { background: #0f1117; color: #e8eaf0; font-family: Consolas, monospace; }
+    nav { background: #1a1d27; border-bottom: 1px solid #2e3146;
+          padding: 14px 32px; display: flex; justify-content: space-between; align-items: center; }
+    nav .brand { font-family: Georgia, serif; font-size: 18px; color: #f7a44f; }
+    nav a { color: #4f8ef7; text-decoration: none; font-size: 12px; margin-left: 16px; }
+    .container { max-width: 820px; margin: 40px auto; padding: 0 24px; }
+    h2 { font-size: 16px; color: #f7a44f; margin-bottom: 24px; }
+    h3 { font-size: 14px; color: #7a7f94; margin-bottom: 16px; font-weight: normal; }
+    .card { background: #1a1d27; border: 1px solid #2e3146;
+            border-radius: 10px; padding: 28px 32px; margin-bottom: 28px; }
+    label { display: block; font-size: 12px; color: #7a7f94; margin-bottom: 6px; }
+    input[type=text], input[type=password] {
+      width: 100%; padding: 9px 12px; background: #252836; border: 1px solid #2e3146;
+      color: #e8eaf0; border-radius: 6px; font-size: 13px; margin-bottom: 14px; outline: none; font-family: Consolas, monospace;
+    }
+    input:focus { border-color: #f7a44f; }
+    select {
+      padding: 9px 12px; background: #252836; border: 1px solid #2e3146;
+      color: #e8eaf0; border-radius: 6px; font-size: 13px; margin-bottom: 14px;
+      outline: none; width: 180px; font-family: Consolas, monospace;
+    }
+    button {
+      padding: 9px 24px; border: none; border-radius: 6px;
+      font-family: Consolas, monospace; font-size: 13px; font-weight: bold; cursor: pointer;
+    }
+    .btn-create { background: #4fba74; color: #fff; }
+    .btn-create:hover { background: #3aa060; }
+    .btn-delete { background: #f74f4f; color: #fff; padding: 5px 14px; font-size: 12px; }
+    .btn-delete:hover { background: #d43a3a; }
+    table { width: 100%; border-collapse: collapse; font-size: 13px; }
+    th { text-align: left; color: #7a7f94; padding: 8px 12px; border-bottom: 1px solid #2e3146; }
+    td { padding: 10px 12px; border-bottom: 1px solid #1e2135; }
+    .badge-admin { background: #2a1a0a; color: #f7a44f; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
+    .badge-user  { background: #1a2030; color: #4f8ef7; border-radius: 4px; padding: 2px 8px; font-size: 11px; }
+    .msg-ok  { background: #1a2a1a; border: 1px solid #4fba74; color: #4fba74;
+               padding: 10px 14px; border-radius: 6px; font-size: 12px; margin-bottom: 16px; }
+    .msg-err { background: #2a1a1a; border: 1px solid #f74f4f; color: #f74f4f;
+               padding: 10px 14px; border-radius: 6px; font-size: 12px; margin-bottom: 16px; }
+  </style>
+</head>
+<body>
+  <nav>
+    <span class="brand">⬡ KnowWhere Admin</span>
+    <div>
+      <a href="/search" id="back-search">← Back to Search</a>
+      <a href="/logout" id="logout-link">Logout</a>
+    </div>
+  </nav>
+
+  <div class="container">
+    <h2>Admin Panel</h2>
+
+    {% if message %}
+      <div class="{{ 'msg-ok' if message[0] == 'success' else 'msg-err' }}"
+           id="admin-message">{{ message[1] }}</div>
+    {% endif %}
+
+    <!-- CREATE USER FORM -->
+    <div class="card">
+      <h3>Create New User</h3>
+      <form method="POST" id="create-user-form">
+        <input type="hidden" name="action" value="create">
+
+        <label for="new_username">Username</label>
+        <input type="text" id="new_username" name="new_username"
+               placeholder="Enter username" autocomplete="off">
+
+        <label for="new_password">Password</label>
+        <input type="password" id="new_password" name="new_password"
+               placeholder="Min 6 characters">
+
+        <label for="new_role">Role</label>
+        <select id="new_role" name="new_role">
+          <option value="user">User</option>
+          <option value="admin">Admin</option>
+        </select>
+
+        <br>
+        <button type="submit" class="btn-create" id="create-btn">Create User</button>
+      </form>
+    </div>
+
+    <!-- USER LIST TABLE -->
+    <div class="card">
+      <h3>All Users ({{ users | length }})</h3>
+      <table id="user-table">
+        <thead>
+          <tr>
+            <th>Username</th>
+            <th>Role</th>
+            <th>Action</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for u in users %}
+          <tr>
+            <td>{{ u.username }}</td>
+            <td>
+              <span class="{{ 'badge-admin' if u.role == 'admin' else 'badge-user' }}">
+                {{ u.role }}
+              </span>
+            </td>
+            <td>
+              {% if u.username != username %}
+              <form method="POST" style="display:inline;">
+                <input type="hidden" name="action" value="delete">
+                <input type="hidden" name="target_username" value="{{ u.username }}">
+                <button type="submit" class="btn-delete"
+                        onclick="return confirm('Delete user {{ u.username }}?')">
+                  Delete
+                </button>
+              </form>
+              {% else %}
+              <span style="color: #7a7f94; font-size: 12px;">You</span>
+              {% endif %}
+            </td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</body>
+</html>

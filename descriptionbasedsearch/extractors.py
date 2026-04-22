@@ -210,42 +210,20 @@ def extract_text_odp(filepath: str) -> str:
 #   3. This handles mixed PDFs (some digital pages, some scanned pages)
 
 def extract_text_pdf(filepath: str) -> str:
+    text_parts = []
     try:
         import pdfplumber
-        from PIL import Image
-        import pytesseract
-        pytesseract.pytesseract.tesseract_cmd = TESSERACT_PATH
-
-        text_parts = []
-
         with pdfplumber.open(filepath) as pdf:
             for page_num, page in enumerate(pdf.pages, start=1):
                 try:
                     page_text = page.extract_text()
-
-                    if page_text and page_text.strip():
-                        # normal digital page — use pdfplumber text directly
+                    if page_text:
                         text_parts.append(page_text)
-                    else:
-                        # no text found — page is likely scanned, try OCR
-                        print(f"  [PDF] Page {page_num} has no text — trying OCR...")
-                        try:
-                            img = page.to_image(resolution=300).original
-                            ocr_text = pytesseract.image_to_string(img)
-                            if ocr_text.strip():
-                                text_parts.append(ocr_text)
-                        except Exception as ocr_err:
-                            print(f"  [PDF] OCR failed on page {page_num}: {ocr_err}")
-
-                except Exception as page_err:
-                    print(f"  [PDF] Skipping page {page_num} in '{filepath}': {page_err}")
-
-        return "\n".join(text_parts)
-
+                except Exception as e:
+                    print(f"  [PDF] Skipping page {page_num}: {e}")
     except Exception as e:
         print(f"  [PDF] Cannot open '{filepath}': {e}")
-        return ""
-
+    return "\n".join(text_parts)
 
 # =============================================================================
 # 5. EMAIL DOCUMENTS
